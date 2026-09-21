@@ -64,7 +64,14 @@ class TestDownloadVideo:
     ) -> None:
         from app.services.youtube import YouTubeError
 
-        mock_stream.side_effect = YouTubeError("download failed")
+        # stream_download is a generator function, so a real failure
+        # surfaces on the first next() -- not when it is called. Using
+        # side_effect here would test a path production cannot reach.
+        def failing_generator():
+            raise YouTubeError("download failed")
+            yield b""  # pragma: no cover - makes this a generator
+
+        mock_stream.return_value = failing_generator()
 
         response = client.get(
             "/api/download",
@@ -73,6 +80,47 @@ class TestDownloadVideo:
 
         assert response.status_code == 500
         assert response.json()["error"]["code"] == "download_error"
+
+    @patch("app.routers.download.stream_download")
+    def test_download_of_unavailable_video_returns_404(
+        self,
+        mock_stream: MagicMock,
+        client,
+    ) -> None:
+        from app.services.youtube import VideoNotFoundError
+
+        def unavailable_generator():
+            raise VideoNotFoundError("Video is unavailable: ERROR: Private video")
+            yield b""  # pragma: no cover - makes this a generator
+
+        mock_stream.return_value = unavailable_generator()
+
+        response = client.get(
+            "/api/download",
+            params={"url": "https://www.youtube.com/watch?v=test"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "not_found"
+
+    @patch("app.routers.download.stream_download")
+    def test_download_yielding_no_data_returns_404_not_empty_200(
+        self,
+        mock_stream: MagicMock,
+        client,
+    ) -> None:
+        # Regression guard: an empty stream used to be served as a
+        # complete 200 with a 0-byte body, indistinguishable from a
+        # successful download.
+        mock_stream.return_value = iter([])
+
+        response = client.get(
+            "/api/download",
+            params={"url": "https://www.youtube.com/watch?v=test"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "not_found"
 
     def test_download_without_url_returns_422(self, client) -> None:
         response = client.get("/api/download")
