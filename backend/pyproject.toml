@@ -13,7 +13,7 @@ dependencies = [
     # structurally below the CVE-2026-48710 fix). Cap below 0.142 so
     # dependabot surfaces further bumps as PRs rather than letting CI float.
     "fastapi>=0.121.0,<0.142",
-    "uvicorn[standard]>=0.30.0,<0.53",
+    "uvicorn[standard]>=0.30.0,<0.54",
     "yt-dlp==2026.8.19",
     "slowapi>=0.1.9,<0.2",
 ]
