@@ -117,12 +117,3 @@ export function formatDuration(seconds: number): string {
   }
   return `${m}:${String(s).padStart(2, "0")}`;
 }
-
-export function formatFileSize(bytes: number | null): string {
-  if (bytes === null) return "";
-  const mb = bytes / (1024 * 1024);
-  if (mb >= 1024) {
-    return `${(mb / 1024).toFixed(1)} GB`;
-  }
-  return `${mb.toFixed(1)} MB`;
-}

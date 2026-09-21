@@ -4,7 +4,6 @@ import {
   FETCH_INFO_TIMEOUT_MS,
   fetchInfo,
   formatDuration,
-  formatFileSize,
   isPlaylistInfo,
   isVideoInfo,
   type PlaylistInfo,
@@ -51,20 +50,6 @@ describe("formatDuration", () => {
 
   it("renders zero as 0:00", () => {
     expect(formatDuration(0)).toBe("0:00");
-  });
-});
-
-describe("formatFileSize", () => {
-  it("returns empty string for null", () => {
-    expect(formatFileSize(null)).toBe("");
-  });
-
-  it("formats megabyte-scale sizes in MB", () => {
-    expect(formatFileSize(1024 * 1024 * 5)).toBe("5.0 MB");
-  });
-
-  it("formats gigabyte-scale sizes in GB", () => {
-    expect(formatFileSize(1024 * 1024 * 1024 * 2.5)).toBe("2.5 GB");
   });
 });
 
