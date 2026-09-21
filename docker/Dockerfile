@@ -1,7 +1,7 @@
 # Stage 0: Pull a pinned Deno binary. yt-dlp uses an external JavaScript
 # runtime to solve YouTube player challenges; Deno is the upstream
 # recommended choice and ships as a single static binary.
-FROM denoland/deno:bin-2.8.2 AS deno-bin
+FROM denoland/deno:bin-2.9.7 AS deno-bin
 
 # Stage 1: Build frontend
 FROM node:26.9.0-alpine AS frontend-build
