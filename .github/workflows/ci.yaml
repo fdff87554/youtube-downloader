@@ -12,21 +12,21 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v4
       - name: Cache pip downloads
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements*.lock') }}
           restore-keys: |
             ${{ runner.os }}-pip-
       - name: Cache npm downloads
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: ${{ runner.os }}-npm-${{ hashFiles('frontend/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-npm-
       - name: Cache pre-commit environments
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
           key: ${{ runner.os }}-pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -53,14 +53,14 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v4
       - name: Cache pip downloads
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-audit-${{ hashFiles('backend/requirements*.lock') }}
           restore-keys: |
             ${{ runner.os }}-pip-audit-
       - name: Cache npm downloads
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: ${{ runner.os }}-npm-${{ hashFiles('frontend/package-lock.json') }}
