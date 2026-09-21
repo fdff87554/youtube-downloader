@@ -13,6 +13,8 @@ from app.limiter import limiter
 
 logger = logging.getLogger(__name__)
 
+RATE_LIMIT_WINDOW_SECONDS = 60
+
 
 def _debug_enabled() -> bool:
     """Whether the app is running in development mode."""
@@ -64,6 +66,9 @@ def _rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONRespons
                 ),
             }
         },
+        # Every configured limit uses a one-minute window, so the
+        # bucket has definitely refilled by then.
+        headers={"Retry-After": str(RATE_LIMIT_WINDOW_SECONDS)},
     )
 
 
