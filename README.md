@@ -87,11 +87,27 @@ The container reads the following environment variables:
 | `ALLOWED_ORIGINS` | _required_ | Comma-separated CORS origins (see below)   |
 | `DEBUG`           | `false`    | When `true`, errors include exception text |
 | `PORT`            | `8080`     | Host port forwarded to the container       |
+| `TRUSTED_PROXIES` | _empty_    | Comma-separated CIDRs of upstream proxies  |
 
 `ALLOWED_ORIGINS` must be set to the origin(s) that may call the API,
 e.g. `https://example.com,https://x.example.com`. The application
 refuses to start with an empty value unless `DEBUG=true`, in which case
 all origins are permitted (for local development only).
+
+### `TRUSTED_PROXIES`
+
+Set this whenever another reverse proxy (Caddy, nginx, Cloudflare, a
+load balancer) sits in front of the container:
+
+```bash
+TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12 docker compose up -d
+```
+
+Rate limiting is per client IP, at both the nginx and the application
+layer. Without `TRUSTED_PROXIES` the container only sees the upstream
+proxy's address, so every visitor shares one quota and a single busy
+client can return `429` to everyone. Leave it empty when the container
+is directly exposed.
 
 ## Development
 
@@ -187,6 +203,9 @@ Errors use a unified envelope:
   long downloads. Adjust if your reverse proxy has stricter limits.
 - Set `ALLOWED_ORIGINS` and (where supported) configure rate limiting at
   the reverse-proxy layer for any internet-facing deployment.
+- Set `TRUSTED_PROXIES` to your proxy's network whenever one is in front
+  of the container, or the built-in per-IP rate limits degrade into a
+  single shared quota.
 
 ## Troubleshooting
 
