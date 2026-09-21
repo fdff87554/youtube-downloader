@@ -11,7 +11,7 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.3.0",
+    "@tailwindcss/vite": "^4.3.3",
     "happy-dom": "^20.14.5",
     "tailwindcss": "^4.3.0",
     "typescript": "~6.0.3",
