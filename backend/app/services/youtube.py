@@ -161,7 +161,7 @@ def stream_download(
     url: str,
     format_type: str = "mp4",
     quality: str = "best",
-) -> Generator[bytes, None, None]:
+) -> Generator[bytes]:
     """Stream a video download as chunks without writing to disk.
 
     Uses yt-dlp subprocess to pipe output directly to the caller,
@@ -189,12 +189,12 @@ def stream_download(
         yield from _stream_video(url, quality)
 
 
-def _stream_video(url: str, quality: str) -> Generator[bytes, None, None]:
+def _stream_video(url: str, quality: str) -> Generator[bytes]:
     cmd = _build_video_command(url, quality)
     yield from _run_piped_process(cmd)
 
 
-def _stream_mp3(url: str) -> Generator[bytes, None, None]:
+def _stream_mp3(url: str) -> Generator[bytes]:
     """Stream MP3 by piping yt-dlp audio through ffmpeg for conversion.
 
     yt-dlp skips post-processors in stdout mode, so we pipe the raw
@@ -275,7 +275,7 @@ def _stream_mp3(url: str) -> Generator[bytes, None, None]:
 def _run_piped_process(
     cmd: list[str],
     name: str = "yt-dlp",
-) -> Generator[bytes, None, None]:
+) -> Generator[bytes]:
     process: subprocess.Popen[bytes] | None = None
     drainer: threading.Thread | None = None
     try:

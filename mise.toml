@@ -1,6 +1,6 @@
 [tools]
 # Python and Node 仍 pin major.minor，避免 runtime 跳版破壞 lockfile
-python = "3.12"
+python = "3.14"
 node = "22"
 # Formatter / linter 採 latest 浮動，pre-commit autoupdate 可同步 revs
 ruff = "latest"
