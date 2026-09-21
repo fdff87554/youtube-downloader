@@ -194,6 +194,20 @@ Errors use a unified envelope:
 }
 ```
 
+## What gets logged
+
+The container writes to stdout/stderr only; nothing is persisted inside
+the image.
+
+- **Access log**: client IP, timestamp, method, path, status, response
+  size and duration. Query strings are deliberately excluded, so the
+  video URL and title a visitor requested are never logged.
+- **Application log**: warnings and errors, including `yt-dlp` stderr
+  when a download fails. A failing URL can appear here.
+
+How long any of this is kept is up to your container log driver, which
+this project does not configure.
+
 ## Deployment notes
 
 - The container listens on port `8080` inside the network. Expose it as
