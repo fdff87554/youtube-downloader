@@ -37,6 +37,68 @@ class TestCorsConfiguration:
         assert app.title == "YouTube Downloader API"
 
 
+class TestCorsHeaders:
+    """The allow-list only matters if it reaches the response."""
+
+    def _client(self, monkeypatch: pytest.MonkeyPatch, origins: str) -> TestClient:
+        monkeypatch.setenv("ALLOWED_ORIGINS", origins)
+        monkeypatch.setenv("DEBUG", "false")
+        return TestClient(create_app())
+
+    def test_allowed_origin_is_echoed_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(monkeypatch, "https://example.com")
+
+        response = client.get("/api/health", headers={"Origin": "https://example.com"})
+
+        assert response.headers["access-control-allow-origin"] == (
+            "https://example.com"
+        )
+
+    def test_other_origins_get_no_allow_header(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(monkeypatch, "https://example.com")
+
+        response = client.get("/api/health", headers={"Origin": "https://evil.com"})
+
+        assert "access-control-allow-origin" not in response.headers
+
+    def test_only_get_is_advertised_on_preflight(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._client(monkeypatch, "https://example.com")
+
+        response = client.options(
+            "/api/health",
+            headers={
+                "Origin": "https://example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+        assert response.headers["access-control-allow-methods"] == "GET"
+
+
+class TestValidationErrors:
+    def test_missing_query_parameter_returns_422(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # FastAPI answers its own validation failures with
+        # {"detail": [...]}, not the project envelope. Pinned here
+        # because the frontend has to tolerate both shapes.
+        monkeypatch.setenv("ALLOWED_ORIGINS", "https://example.com")
+        monkeypatch.setenv("DEBUG", "false")
+        client = TestClient(create_app())
+
+        response = client.get("/api/info")
+
+        assert response.status_code == 422
+        assert "detail" in response.json()
+        assert "error" not in response.json()
+
+
 class TestVersion:
     def test_app_version_matches_the_installed_package(
         self, monkeypatch: pytest.MonkeyPatch
