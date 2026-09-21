@@ -220,6 +220,11 @@ this project does not configure.
 - Set `TRUSTED_PROXIES` to your proxy's network whenever one is in front
   of the container, or the built-in per-IP rate limits degrade into a
   single shared quota.
+- The container runs with a read-only root filesystem and a tmpfs on
+  `/tmp`. If you write your own compose file or run `docker run`
+  directly, carry both over: `--read-only --tmpfs /tmp`. Without the
+  tmpfs the container cannot start; without `--read-only` it still
+  works, but the no-disk-I/O guarantee is then only a convention.
 
 ## Troubleshooting
 
