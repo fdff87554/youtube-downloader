@@ -126,7 +126,7 @@ formatters/linters used by the project (`ruff`, `yamlfmt`, `shfmt`,
 ### Backend
 
 ```bash
-pip install -r backend/requirements-dev.lock
+pip install --require-hashes -r backend/requirements-dev.lock
 pip install -e backend --no-deps
 cd backend && pytest -v
 ```
@@ -135,8 +135,12 @@ To regenerate the lockfiles after editing `backend/pyproject.toml`:
 
 ```bash
 pip install pip-tools
-pip-compile backend/pyproject.toml -o backend/requirements.lock
-pip-compile backend/pyproject.toml --extra dev -o backend/requirements-dev.lock
+# --generate-hashes is required: CI and the image install with
+# --require-hashes and will refuse a lockfile without them.
+pip-compile backend/pyproject.toml --generate-hashes \
+  -o backend/requirements.lock
+pip-compile backend/pyproject.toml --extra dev --generate-hashes \
+  -o backend/requirements-dev.lock
 ```
 
 ### Frontend
