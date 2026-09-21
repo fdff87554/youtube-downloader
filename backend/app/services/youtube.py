@@ -241,6 +241,9 @@ def _stream_mp3(url: str) -> Generator[bytes]:
         "ffmpeg",
         "-i",
         "pipe:0",
+        # bestaudio/best can resolve to a progressive stream that still
+        # carries video, which the mp3 muxer cannot take.
+        "-vn",
         "-f",
         "mp3",
         "-ab",
