@@ -37,6 +37,22 @@ class TestCorsConfiguration:
         assert app.title == "YouTube Downloader API"
 
 
+class TestVersion:
+    def test_app_version_matches_the_installed_package(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # app/__init__.py is the single source; pyproject reads it back
+        # through setuptools' dynamic version.
+        from importlib.metadata import version
+
+        monkeypatch.setenv("ALLOWED_ORIGINS", "https://example.com")
+        monkeypatch.setenv("DEBUG", "false")
+
+        app = create_app()
+
+        assert app.version == version("youtube-downloader-backend")
+
+
 class TestInteractiveDocs:
     """Swagger UI is unauthenticated and loads a third-party CDN."""
 

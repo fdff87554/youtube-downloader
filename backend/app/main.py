@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from app import __version__
 from app.limiter import limiter
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ def create_app() -> FastAPI:
     debug = _debug_enabled()
     app = FastAPI(
         title="YouTube Downloader API",
-        version="0.1.0",
+        version=__version__,
         docs_url="/api/docs" if debug else None,
         openapi_url="/api/openapi.json" if debug else None,
     )

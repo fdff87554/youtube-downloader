@@ -4,9 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "youtube-downloader-backend"
-# Kept in step with the git tag, which is what releases and the GHCR image
-# tags are cut from. This package is never published to an index.
-version = "0.3.0"
+# Read from app/__init__.py so the value the API reports and the value
+# the package declares cannot drift. Kept in step with the git tag,
+# which is what releases and the GHCR image tags are cut from. This
+# package is never published to an index.
+dynamic = ["version"]
 description = "Privacy-first YouTube downloader backend"
 requires-python = ">=3.14"
 dependencies = [
@@ -28,6 +30,9 @@ dev = [
     "pytest-asyncio>=0.24.0,<2.0",
     "httpx>=0.27.0,<1.0",
 ]
+
+[tool.setuptools.dynamic]
+version = { attr = "app.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["."]
