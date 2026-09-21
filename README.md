@@ -103,7 +103,7 @@ Install [mise](https://mise.jdx.dev/) and let it set up the toolchain:
 mise install
 ```
 
-This provides Python 3.12, Node 22, `pre-commit`, and the
+This provides Python 3.14, Node 22, `pre-commit`, and the
 formatters/linters used by the project (`ruff`, `yamlfmt`, `shfmt`,
 `shellcheck`).
 
