@@ -85,6 +85,14 @@ async function handleUrlSubmit(url: string, sections: Sections): Promise<void> {
       renderVideoFlow({ info, url, sections, selection });
     } else if (isPlaylistInfo(info)) {
       renderPlaylistFlow({ info, sections, selection });
+    } else {
+      // Neither guard matched, so the response is not a shape this
+      // build knows. Without this branch the spinner just stopped and
+      // left a blank page with nothing to act on.
+      showError(
+        sections.error,
+        new Error("Unexpected response from the server. Please try again."),
+      );
     }
   } catch (err) {
     showError(sections.error, err);
