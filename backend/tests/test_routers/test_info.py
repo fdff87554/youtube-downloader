@@ -1,5 +1,6 @@
 """Tests for the video info and format listing API endpoints."""
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -88,6 +89,45 @@ class TestGetInfo:
         assert response.status_code == 200
         data = response.json()
         assert data["playlist_id"] == "PLtest"
+
+
+class TestEventLoopIsNotBlocked:
+    """yt-dlp extraction must not run on the event loop thread."""
+
+    @patch("app.routers.info.extract_video_info")
+    def test_extraction_runs_off_the_event_loop(
+        self, mock_extract: MagicMock, client: TestClient
+    ) -> None:
+        # asyncio.get_running_loop() only succeeds on the thread that
+        # runs the loop. If get_info were `async def`, the blocking
+        # extraction would execute there and freeze every other
+        # request; as a sync endpoint FastAPI offloads it to a worker.
+        observed: dict[str, bool] = {}
+
+        def record_execution_context(url: str) -> VideoInfo:
+            try:
+                asyncio.get_running_loop()
+                observed["on_event_loop"] = True
+            except RuntimeError:
+                observed["on_event_loop"] = False
+            return VideoInfo(
+                video_id="test",
+                title="Test",
+                thumbnail="",
+                duration=10,
+                uploader="x",
+                formats=[],
+            )
+
+        mock_extract.side_effect = record_execution_context
+
+        response = client.get(
+            "/api/info",
+            params={"url": "https://www.youtube.com/watch?v=test"},
+        )
+
+        assert response.status_code == 200
+        assert observed["on_event_loop"] is False
 
 
 class TestErrorMasking:
