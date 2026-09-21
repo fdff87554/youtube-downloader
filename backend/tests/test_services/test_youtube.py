@@ -269,6 +269,35 @@ class TestConfigFilesIgnored:
             assert cmd[1] == "--ignore-config"
 
 
+class TestExtractorsRestricted:
+    """Only YouTube's own extractors may ever run.
+
+    Without this, a youtube.com path that YoutubeTabIE declines falls
+    through to GenericIE, which follows redirects off YouTube entirely
+    and would turn /api/download into an open proxy given any open
+    redirect on the allow-listed hosts.
+    """
+
+    def test_base_opts_name_the_allowed_extractors(self) -> None:
+        assert _base_opts()["allowed_extractors"] == ["youtube", "youtube:tab"]
+
+    def test_both_commands_restrict_extractors(self) -> None:
+        for cmd in (
+            _build_video_command("https://www.youtube.com/watch?v=test", "best"),
+            _build_audio_command("https://www.youtube.com/watch?v=test"),
+        ):
+            assert "--use-extractors" in cmd
+            assert cmd[cmd.index("--use-extractors") + 1] == "youtube,youtube:tab"
+
+    def test_generic_extractor_is_not_allowed(self) -> None:
+        for cmd in (
+            _build_video_command("https://www.youtube.com/watch?v=test", "best"),
+            _build_audio_command("https://www.youtube.com/watch?v=test"),
+        ):
+            assert "generic" not in cmd[cmd.index("--use-extractors") + 1]
+        assert "generic" not in _base_opts()["allowed_extractors"]
+
+
 class TestResolveVideoFormat:
     @pytest.mark.parametrize("quality", ["480", "720", "1080"])
     def test_bounded_quality_never_falls_back_to_unrestricted_best(

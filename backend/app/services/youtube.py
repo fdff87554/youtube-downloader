@@ -36,6 +36,13 @@ MAX_PLAYLIST_SIZE = 200
 # line or two; the rest is progress noise.
 STDERR_TAIL_LINES = 10
 UNAVAILABLE_MARKERS = ("private", "unavailable", "not available")
+# The host allow-list in YOUTUBE_URL_PATTERN validates the string the
+# caller sent; it cannot constrain where yt-dlp goes next. Paths that
+# YoutubeTabIE declines (about, t/terms, signin, results, ...) fall
+# through to GenericIE, which fetches the URL and re-dispatches on the
+# final URL after redirects -- youtube.com/about/xyz ends up requesting
+# about.youtube. Naming the extractors keeps every request on YouTube.
+ALLOWED_EXTRACTORS = ("youtube", "youtube:tab")
 
 
 class YouTubeError(Exception):
@@ -428,6 +435,8 @@ def _build_audio_command(url: str) -> list[str]:
     return [
         "yt-dlp",
         "--ignore-config",
+        "--use-extractors",
+        ",".join(ALLOWED_EXTRACTORS),
         "--no-playlist",
         "-f",
         "bestaudio/best",
@@ -447,6 +456,8 @@ def _build_video_command(url: str, quality: str) -> list[str]:
     return [
         "yt-dlp",
         "--ignore-config",
+        "--use-extractors",
+        ",".join(ALLOWED_EXTRACTORS),
         "--no-playlist",
         "-f",
         format_spec,
@@ -488,6 +499,7 @@ def _base_opts() -> dict[str, Any]:
         "quiet": True,
         "no_warnings": True,
         "socket_timeout": SOCKET_TIMEOUT,
+        "allowed_extractors": list(ALLOWED_EXTRACTORS),
         # Disable yt-dlp's player JS cache so the service writes nothing
         # to ~/.cache/yt-dlp at runtime.
         "cachedir": False,
