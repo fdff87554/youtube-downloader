@@ -46,7 +46,25 @@ jobs:
         run: cd frontend && npm test
       - name: Build frontend
         run: cd frontend && npm run build
-  security-audit:
+  # npm-audit and pip-audit are separate jobs on purpose. As a single job they
+  # ran in sequence, so a frontend finding aborted the run before pip-audit
+  # executed and the red X said nothing about the backend.
+  npm-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install mise
+        uses: jdx/mise-action@v4
+      - name: Cache npm downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+      - name: npm audit (frontend)
+        run: cd frontend && npm audit --audit-level=high
+  pip-audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -59,15 +77,6 @@ jobs:
           key: ${{ runner.os }}-pip-audit-${{ hashFiles('backend/requirements*.lock') }}
           restore-keys: |
             ${{ runner.os }}-pip-audit-
-      - name: Cache npm downloads
-        uses: actions/cache@v6
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-${{ hashFiles('frontend/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-      - name: npm audit (frontend)
-        run: cd frontend && npm audit --audit-level=high
       - name: pip-audit (backend)
         run: |
           pip install pip-audit
