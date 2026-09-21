@@ -200,20 +200,7 @@ def _stream_mp3(url: str) -> Generator[bytes]:
     yt-dlp skips post-processors in stdout mode, so we pipe the raw
     audio stream through ffmpeg to convert to MP3.
     """
-    ytdlp_cmd = [
-        "yt-dlp",
-        "--no-playlist",
-        "-f",
-        "bestaudio/best",
-        "-o",
-        "-",
-        "--quiet",
-        "--no-warnings",
-        "--no-cache-dir",
-        "--socket-timeout",
-        str(SOCKET_TIMEOUT),
-        url,
-    ]
+    ytdlp_cmd = _build_audio_command(url)
     ffmpeg_cmd = [
         "ffmpeg",
         "-i",
@@ -372,6 +359,23 @@ def build_download_filename(
     name = _sanitize_filename(title) if title else "download"
     ext = "mp3" if format_type == "mp3" else "mp4"
     return f"{name}.{ext}"
+
+
+def _build_audio_command(url: str) -> list[str]:
+    return [
+        "yt-dlp",
+        "--no-playlist",
+        "-f",
+        "bestaudio/best",
+        "-o",
+        "-",
+        "--quiet",
+        "--no-warnings",
+        "--no-cache-dir",
+        "--socket-timeout",
+        str(SOCKET_TIMEOUT),
+        url,
+    ]
 
 
 def _build_video_command(url: str, quality: str) -> list[str]:
