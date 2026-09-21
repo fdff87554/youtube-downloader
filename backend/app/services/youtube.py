@@ -23,8 +23,13 @@ from app.schemas.video import (
 
 logger = logging.getLogger(__name__)
 
+# Scheme and host are case-insensitive per RFC 3986 section 3.1/3.2.2,
+# so a pasted "https://WWW.YouTube.com/..." is a valid YouTube URL. The
+# trailing "/" is load-bearing: it is what stops youtube.com@evil.com
+# and youtube.com.evil.com from matching, so do not relax it.
 YOUTUBE_URL_PATTERN = re.compile(
     r"^https?://(?:www\.|m\.)?(?:youtube\.com|youtu\.be)/",
+    re.IGNORECASE,
 )
 
 SOCKET_TIMEOUT = 30

@@ -30,9 +30,27 @@ class TestValidateYoutubeUrl:
     def test_valid_mobile_url_accepted(self) -> None:
         validate_youtube_url("https://m.youtube.com/watch?v=dQw4w9WgXcQ")
 
+    def test_uppercase_host_accepted(self) -> None:
+        # Host and scheme are case-insensitive, and URLs get pasted in
+        # with whatever casing their source used.
+        validate_youtube_url("https://WWW.YouTube.com/watch?v=dQw4w9WgXcQ")
+        validate_youtube_url("HTTPS://YOUTU.BE/dQw4w9WgXcQ")
+
     def test_non_youtube_url_raises_error(self) -> None:
         with pytest.raises(InvalidURLError, match="valid YouTube URL"):
             validate_youtube_url("https://vimeo.com/12345")
+
+    def test_lookalike_hosts_still_rejected(self) -> None:
+        # The "/" after the host is what rejects these; the
+        # case-insensitive flag must not widen the pattern.
+        for url in (
+            "https://youtube.com@evil.com/watch?v=x",
+            "https://youtube.com.evil.com/watch?v=x",
+            "https://notyoutube.com/watch?v=x",
+            "https://YOUTUBE.COM.EVIL.COM/watch?v=x",
+        ):
+            with pytest.raises(InvalidURLError):
+                validate_youtube_url(url)
 
     def test_empty_string_raises_error(self) -> None:
         with pytest.raises(InvalidURLError):
