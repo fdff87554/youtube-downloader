@@ -9,11 +9,10 @@ description = "Privacy-first YouTube downloader backend"
 requires-python = ">=3.12"
 dependencies = [
     # 0.121.0 is the earliest release that pulls starlette>=0.49.1, the fix
-    # line for CVE-2025-62727. Raised below 0.137 so the lockfile can resolve
-    # starlette>=1.0.1, the fix for CVE-2026-48710 (fastapi<0.124 pinned
-    # starlette<0.51, structurally below the fix). Cap below 0.137 so
+    # line for CVE-2025-62727 (fastapi<0.124 pinned starlette<0.51, which is
+    # structurally below the CVE-2026-48710 fix). Cap below 0.142 so
     # dependabot surfaces further bumps as PRs rather than letting CI float.
-    "fastapi>=0.121.0,<0.137",
+    "fastapi>=0.121.0,<0.142",
     "uvicorn[standard]>=0.30.0,<0.50",
     "yt-dlp==2026.8.19",
     "slowapi>=0.1.9,<0.2",
