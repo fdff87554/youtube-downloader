@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "youtube-downloader-backend"
-version = "0.1.0"
+# Kept in step with the git tag, which is what releases and the GHCR image
+# tags are cut from. This package is never published to an index.
+version = "0.3.0"
 description = "Privacy-first YouTube downloader backend"
 requires-python = ">=3.14"
 dependencies = [
