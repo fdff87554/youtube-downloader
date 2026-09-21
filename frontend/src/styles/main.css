@@ -1,1 +1,22 @@
 @import "tailwindcss";
+
+/*
+ * Pin the whole UI to Maple Mono, by name only -- deliberately no @font-face.
+ *
+ * The CN build is the one that covers video titles in Chinese, and it is
+ * 20.4 MB per weight as TTF with no woff2 published upstream. Self-hosting it
+ * would dwarf the entire application bundle and the Docker image with it.
+ * A CDN is not an option either: this service exists so that nothing about a
+ * request reaches a third party, and a webfont fetch leaks the viewer's IP by
+ * construction.
+ *
+ * Naming the font without shipping it costs nothing and degrades cleanly:
+ * anyone with Maple Mono installed sees it, everyone else gets their
+ * platform's monospace face.
+ */
+@theme {
+  --font-sans:
+    "Maple Mono NF CN", "Maple Mono NF", "Maple Mono", ui-monospace,
+    SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --font-mono: var(--font-sans);
+}
