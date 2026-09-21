@@ -1,6 +1,7 @@
 """Tests for the FastAPI application factory."""
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app.main import create_app
 
@@ -34,3 +35,27 @@ class TestCorsConfiguration:
         app = create_app()
 
         assert app.title == "YouTube Downloader API"
+
+
+class TestInteractiveDocs:
+    """Swagger UI is unauthenticated and loads a third-party CDN."""
+
+    def test_docs_are_not_served_in_production(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ALLOWED_ORIGINS", "https://example.com")
+        monkeypatch.setenv("DEBUG", "false")
+        client = TestClient(create_app())
+
+        assert client.get("/api/docs").status_code == 404
+        assert client.get("/api/openapi.json").status_code == 404
+
+    def test_docs_are_served_in_debug_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ALLOWED_ORIGINS", "https://example.com")
+        monkeypatch.setenv("DEBUG", "true")
+        client = TestClient(create_app())
+
+        assert client.get("/api/docs").status_code == 200
+        assert client.get("/api/openapi.json").status_code == 200
