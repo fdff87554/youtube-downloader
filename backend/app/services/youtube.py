@@ -361,9 +361,17 @@ def build_download_filename(
     return f"{name}.{ext}"
 
 
+# Both subprocess commands below pass --ignore-config. A yt-dlp.conf found
+# anywhere on yt-dlp's search path -- next to the binary, ~/.config/yt-dlp,
+# ~/.yt-dlp, /etc/yt-dlp -- is merged into argv by its CLI entry point, and
+# could re-enable --exec, an external downloader, a cookie file, or -P/-o.
+# The last of those would put media on disk and break the no-disk-I/O
+# guarantee this service is built around. The /api/info path is unaffected:
+# it drives yt-dlp through the Python API, which never reads those files.
 def _build_audio_command(url: str) -> list[str]:
     return [
         "yt-dlp",
+        "--ignore-config",
         "--no-playlist",
         "-f",
         "bestaudio/best",
@@ -382,6 +390,7 @@ def _build_video_command(url: str, quality: str) -> list[str]:
     format_spec = _resolve_video_format(quality)
     return [
         "yt-dlp",
+        "--ignore-config",
         "--no-playlist",
         "-f",
         format_spec,

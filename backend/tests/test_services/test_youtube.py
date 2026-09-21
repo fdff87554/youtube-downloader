@@ -9,6 +9,7 @@ from app.services.youtube import (
     InvalidURLError,
     VideoNotFoundError,
     _base_opts,
+    _build_audio_command,
     _build_video_command,
     _finalize_process,
     _resolve_video_format,
@@ -236,6 +237,36 @@ class TestCacheDisabled:
     def test_video_command_passes_no_cache_dir(self) -> None:
         cmd = _build_video_command("https://www.youtube.com/watch?v=test", "best")
         assert "--no-cache-dir" in cmd
+
+    def test_audio_command_passes_no_cache_dir(self) -> None:
+        cmd = _build_audio_command("https://www.youtube.com/watch?v=test")
+        assert "--no-cache-dir" in cmd
+
+
+class TestConfigFilesIgnored:
+    """A yt-dlp.conf on the host or in the image must never reach argv.
+
+    It could re-enable --exec, an external downloader, a cookie file, or
+    -P/-o, the last of which would write media to disk.
+    """
+
+    def test_video_command_ignores_config_files(self) -> None:
+        cmd = _build_video_command("https://www.youtube.com/watch?v=test", "best")
+        assert "--ignore-config" in cmd
+
+    def test_audio_command_ignores_config_files(self) -> None:
+        cmd = _build_audio_command("https://www.youtube.com/watch?v=test")
+        assert "--ignore-config" in cmd
+
+    def test_ignore_config_precedes_every_other_option(self) -> None:
+        # yt-dlp parses argv left to right, so the flag has to sit ahead of
+        # anything a config file could contradict.
+        for cmd in (
+            _build_video_command("https://www.youtube.com/watch?v=test", "best"),
+            _build_audio_command("https://www.youtube.com/watch?v=test"),
+        ):
+            assert cmd[0] == "yt-dlp"
+            assert cmd[1] == "--ignore-config"
 
 
 class TestResolveVideoFormat:
