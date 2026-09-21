@@ -8,8 +8,9 @@ import re
 import signal
 import subprocess
 import threading
+from collections import deque
 from collections.abc import Generator
-from typing import IO, Any
+from typing import IO, Any, NoReturn
 
 import yt_dlp
 
@@ -30,6 +31,11 @@ SOCKET_TIMEOUT = 30
 CHUNK_SIZE = 65536
 STDERR_DRAIN_TIMEOUT = 2.0
 MAX_PLAYLIST_SIZE = 200
+# How many stderr lines to keep so a failed subprocess can explain itself
+# in the error surfaced to the caller. yt-dlp puts the reason on the last
+# line or two; the rest is progress noise.
+STDERR_TAIL_LINES = 10
+UNAVAILABLE_MARKERS = ("private", "unavailable", "not available")
 
 
 class YouTubeError(Exception):
@@ -221,6 +227,8 @@ def _stream_mp3(url: str) -> Generator[bytes]:
     ffmpeg_proc: subprocess.Popen[bytes] | None = None
     ytdlp_drainer: threading.Thread | None = None
     ffmpeg_drainer: threading.Thread | None = None
+    ytdlp_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+    ffmpeg_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
     try:
         try:
             ytdlp_proc = subprocess.Popen(
@@ -244,8 +252,8 @@ def _stream_mp3(url: str) -> Generator[bytes]:
         if ytdlp_proc.stdout:
             ytdlp_proc.stdout.close()
 
-        ytdlp_drainer = _start_stderr_drainer("yt-dlp", ytdlp_proc)
-        ffmpeg_drainer = _start_stderr_drainer("ffmpeg", ffmpeg_proc)
+        ytdlp_drainer = _start_stderr_drainer("yt-dlp", ytdlp_proc, ytdlp_tail)
+        ffmpeg_drainer = _start_stderr_drainer("ffmpeg", ffmpeg_proc, ffmpeg_tail)
 
         if ffmpeg_proc.stdout is None:
             raise YouTubeError("Failed to open ffmpeg stdout pipe.")
@@ -254,6 +262,18 @@ def _stream_mp3(url: str) -> Generator[bytes]:
             if not chunk:
                 break
             yield chunk
+
+        # yt-dlp is checked first: when it fails, ffmpeg's own non-zero
+        # exit is only a consequence of receiving a truncated stream,
+        # and yt-dlp's stderr carries the reason worth reporting.
+        if ytdlp_proc.wait() != 0:
+            _raise_from_subprocess_failure(
+                "yt-dlp", ytdlp_proc.returncode, ytdlp_tail, ytdlp_drainer
+            )
+        if ffmpeg_proc.wait() != 0:
+            _raise_from_subprocess_failure(
+                "ffmpeg", ffmpeg_proc.returncode, ffmpeg_tail, ffmpeg_drainer
+            )
     finally:
         _finalize_process("ffmpeg", ffmpeg_proc, ffmpeg_drainer)
         _finalize_process("yt-dlp", ytdlp_proc, ytdlp_drainer)
@@ -265,6 +285,7 @@ def _run_piped_process(
 ) -> Generator[bytes]:
     process: subprocess.Popen[bytes] | None = None
     drainer: threading.Thread | None = None
+    stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
     try:
         try:
             process = subprocess.Popen(
@@ -275,7 +296,7 @@ def _run_piped_process(
         except FileNotFoundError as e:
             raise YouTubeError("yt-dlp is not installed or not in PATH.") from e
 
-        drainer = _start_stderr_drainer(name, process)
+        drainer = _start_stderr_drainer(name, process, stderr_tail)
 
         if process.stdout is None:
             raise YouTubeError("Failed to open stdout pipe.")
@@ -284,35 +305,70 @@ def _run_piped_process(
             if not chunk:
                 break
             yield chunk
+
+        # stdout hit EOF, so the process is on its way out. A non-zero
+        # exit here means the download failed; without this the
+        # generator would end normally and the caller would serve a
+        # successful-looking but empty response.
+        if process.wait() != 0:
+            _raise_from_subprocess_failure(
+                name, process.returncode, stderr_tail, drainer
+            )
     finally:
         _finalize_process(name, process, drainer)
 
 
-def _drain_stderr(name: str, stream: IO[bytes]) -> None:
-    """Forward subprocess stderr lines to the application logger."""
+def _drain_stderr(name: str, stream: IO[bytes], tail: deque[str]) -> None:
+    """Forward subprocess stderr lines to the logger, keeping the tail.
+
+    ``tail`` is a bounded deque owned by the caller; it lets a failed
+    subprocess explain itself in the error raised to the caller without
+    holding the whole stderr stream in memory.
+    """
     try:
         for line in iter(stream.readline, b""):
             text = line.decode("utf-8", errors="replace").rstrip()
             if text:
                 logger.warning("%s: %s", name, text)
+                tail.append(text)
     finally:
         with contextlib.suppress(Exception):
             stream.close()
 
 
 def _start_stderr_drainer(
-    name: str, process: subprocess.Popen[bytes]
+    name: str, process: subprocess.Popen[bytes], tail: deque[str]
 ) -> threading.Thread | None:
     """Spawn a daemon thread that drains process.stderr into the logger."""
     if process.stderr is None:
         return None
     drainer = threading.Thread(
         target=_drain_stderr,
-        args=(name, process.stderr),
+        args=(name, process.stderr, tail),
         daemon=True,
     )
     drainer.start()
     return drainer
+
+
+def _raise_from_subprocess_failure(
+    name: str,
+    returncode: int,
+    stderr_tail: deque[str],
+    drainer: threading.Thread | None,
+) -> NoReturn:
+    """Turn a non-zero subprocess exit into the matching service error.
+
+    Waits briefly for the stderr drainer so the tail is complete, then
+    classifies the failure the same way the yt-dlp Python API path does
+    (see ``_raise_from_download_error``).
+    """
+    if drainer is not None:
+        drainer.join(timeout=STDERR_DRAIN_TIMEOUT)
+    detail = " | ".join(stderr_tail) or f"exited with code {returncode}"
+    if _is_unavailable_message(detail):
+        raise VideoNotFoundError(f"Video is unavailable: {detail}")
+    raise YouTubeError(f"{name} failed: {detail}")
 
 
 def _finalize_process(
@@ -475,9 +531,14 @@ def _parse_formats(raw_formats: list[dict[str, Any]]) -> list[VideoFormat]:
     return formats
 
 
+def _is_unavailable_message(message: str) -> bool:
+    """Whether an upstream error text means "this video is not there"."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in UNAVAILABLE_MARKERS)
+
+
 def _raise_from_download_error(e: yt_dlp.utils.DownloadError) -> None:
-    msg = str(e).lower()
-    if "private" in msg or "unavailable" in msg or "not available" in msg:
+    if _is_unavailable_message(str(e)):
         raise VideoNotFoundError(f"Video is unavailable: {e}") from e
     raise YouTubeError(f"Download error: {e}") from e
 

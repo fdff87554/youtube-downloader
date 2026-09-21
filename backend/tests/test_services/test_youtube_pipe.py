@@ -14,7 +14,11 @@ import sys
 
 import pytest
 
-from app.services.youtube import YouTubeError, _run_piped_process
+from app.services.youtube import (
+    VideoNotFoundError,
+    YouTubeError,
+    _run_piped_process,
+)
 
 
 class TestRunPipedProcess:
@@ -53,3 +57,40 @@ class TestRunPipedProcess:
     def test_raises_youtube_error_when_binary_missing(self) -> None:
         with pytest.raises(YouTubeError, match="not installed"):
             list(_run_piped_process(["/no/such/binary"], name="missing"))
+
+    def test_raises_when_process_exits_non_zero_after_empty_stdout(self) -> None:
+        # The failure mode that made an unavailable video look like a
+        # successful download: no stdout, non-zero exit, generator ends.
+        cmd = [sys.executable, "-c", "import sys; sys.exit(1)"]
+
+        with pytest.raises(YouTubeError, match="exited with code 1"):
+            list(_run_piped_process(cmd, name="fake"))
+
+    def test_raises_when_process_exits_non_zero_after_partial_stdout(self) -> None:
+        cmd = [
+            sys.executable,
+            "-c",
+            "import sys\nsys.stdout.buffer.write(b'partial')\nsys.exit(1)\n",
+        ]
+
+        with pytest.raises(YouTubeError):
+            list(_run_piped_process(cmd, name="fake"))
+
+    def test_reports_unavailable_video_as_not_found(self) -> None:
+        # yt-dlp writes the reason to stderr and exits non-zero; the
+        # caller needs 404 rather than 500 for this case.
+        cmd = [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "sys.stderr.write('ERROR: Video unavailable\\n')\n"
+            "sys.exit(1)\n",
+        ]
+
+        with pytest.raises(VideoNotFoundError, match="Video unavailable"):
+            list(_run_piped_process(cmd, name="fake"))
+
+    def test_clean_exit_with_output_does_not_raise(self) -> None:
+        cmd = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok')"]
+
+        assert b"".join(_run_piped_process(cmd, name="fake")) == b"ok"
