@@ -10,15 +10,42 @@ binary-missing failure modes.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
+import time
 
 import pytest
 
 from app.services.youtube import (
     VideoNotFoundError,
     YouTubeError,
+    _finalize_process,
     _run_piped_process,
 )
+
+# Linux-only: the project ships as a Linux container and CI runs on
+# ubuntu-latest.
+PROC_STATUS = "/proc/{pid}/stat"
+
+
+def _is_alive(pid: int) -> bool:
+    """Whether pid exists and is not a zombie awaiting reaping."""
+    try:
+        with open(PROC_STATUS.format(pid=pid)) as stat:
+            state = stat.read().rsplit(") ", 1)[1].split()[0]
+    except FileNotFoundError:
+        return False
+    return state != "Z"
+
+
+def _wait_until_dead(pid: int, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _is_alive(pid):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 class TestRunPipedProcess:
@@ -94,3 +121,52 @@ class TestRunPipedProcess:
         cmd = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok')"]
 
         assert b"".join(_run_piped_process(cmd, name="fake")) == b"ok"
+
+
+class TestFinalizeProcessKillsGrandchildren:
+    """yt-dlp spawns ffmpeg itself when it has to mux two streams.
+
+    Signalling only the direct child left that grandchild holding two
+    HTTPS connections, with no socket timeout of its own, for as long
+    as the container lived.
+    """
+
+    def test_grandchild_does_not_survive_teardown(self) -> None:
+        spawner = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c',"
+            " 'import time; time.sleep(60)'])\n"
+            "print(child.pid, flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", spawner],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        assert process.stdout is not None
+        grandchild_pid = int(process.stdout.readline())
+        assert _is_alive(grandchild_pid)
+
+        _finalize_process("fake", process, drainer=None)
+
+        assert _wait_until_dead(grandchild_pid), (
+            f"grandchild {grandchild_pid} outlived teardown"
+        )
+        assert not _is_alive(process.pid)
+
+    def test_teardown_does_not_signal_the_servers_own_group(self) -> None:
+        # start_new_session puts each child in its own group, so the
+        # killpg target can never be the process running the tests.
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        assert os.getpgid(process.pid) != os.getpgid(0)
+
+        _finalize_process("fake", process, drainer=None)
+        assert not _is_alive(process.pid)

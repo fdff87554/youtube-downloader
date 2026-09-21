@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import re
 import signal
 import subprocess
@@ -35,6 +36,9 @@ YOUTUBE_URL_PATTERN = re.compile(
 SOCKET_TIMEOUT = 30
 CHUNK_SIZE = 65536
 STDERR_DRAIN_TIMEOUT = 2.0
+# Teardown runs while the event loop is finalizing the response
+# generator, so it must not be able to block indefinitely.
+PROCESS_EXIT_TIMEOUT = 5.0
 MAX_PLAYLIST_SIZE = 200
 # How many stderr lines to keep so a failed subprocess can explain itself
 # in the error surfaced to the caller. yt-dlp puts the reason on the last
@@ -261,12 +265,14 @@ def _stream_mp3(url: str) -> Generator[bytes]:
                 ytdlp_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                start_new_session=True,
             )
             ffmpeg_proc = subprocess.Popen(
                 ffmpeg_cmd,
                 stdin=ytdlp_proc.stdout,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                start_new_session=True,
             )
         except FileNotFoundError as e:
             raise YouTubeError(
@@ -318,6 +324,8 @@ def _run_piped_process(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                # Own session, so teardown can signal the whole group.
+                start_new_session=True,
             )
         except FileNotFoundError as e:
             raise YouTubeError("yt-dlp is not installed or not in PATH.") from e
@@ -411,17 +419,40 @@ def _finalize_process(
     if process is None:
         return
     if process.poll() is None:
-        process.kill()
+        _kill_process_group(process)
     if process.stdout:
         with contextlib.suppress(Exception):
             process.stdout.close()
-    process.wait()
+    try:
+        process.wait(timeout=PROCESS_EXIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        logger.error("%s did not exit within %ss", name, PROCESS_EXIT_TIMEOUT)
+        return
     if drainer is not None:
         drainer.join(timeout=STDERR_DRAIN_TIMEOUT)
     # Treat SIGKILL as a clean teardown we initiated; everything else is
     # an unexpected failure that operators need to see in the logs.
     if process.returncode not in (0, -signal.SIGKILL):
         logger.error("%s exited with code %s", name, process.returncode)
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    """SIGKILL the subprocess along with anything it spawned.
+
+    yt-dlp starts ffmpeg itself to mux separate video and audio
+    streams, so killing only the direct child can leave that grandchild
+    holding two HTTPS connections with no socket timeout of its own.
+    Every subprocess here is started with ``start_new_session=True``, so
+    its process group id equals its pid and this can never signal the
+    server's own group.
+    """
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except ProcessLookupError, PermissionError:
+        # Group already gone, or not ours to signal: settle for the
+        # direct child.
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
 
 
 def build_download_filename(
