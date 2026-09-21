@@ -215,6 +215,9 @@ this project does not configure.
   in front for production.
 - `proxy_read_timeout`/`proxy_send_timeout` are set to `600s` to support
   long downloads. Adjust if your reverse proxy has stricter limits.
+- A client may run 3 concurrent `/api/*` requests; further ones get
+  `429` until one finishes. Raise `limit_conn api_conn` in
+  `docker/nginx.conf` if your users legitimately download more at once.
 - Set `ALLOWED_ORIGINS` and (where supported) configure rate limiting at
   the reverse-proxy layer for any internet-facing deployment.
 - Set `TRUSTED_PROXIES` to your proxy's network whenever one is in front
