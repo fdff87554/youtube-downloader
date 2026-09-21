@@ -57,6 +57,14 @@ class InvalidURLError(YouTubeError):
     """Raised when the provided URL is not a valid YouTube URL."""
 
 
+class PlaylistTooLargeError(YouTubeError):
+    """Raised when a playlist has more entries than the service serves.
+
+    This is a property of the caller's input, not a server failure, so
+    callers map it to a 4xx.
+    """
+
+
 def validate_youtube_url(url: str) -> None:
     """Validate that a URL points to YouTube.
 
@@ -130,6 +138,12 @@ def extract_playlist_info(url: str) -> PlaylistInfo:
     ydl_opts = _base_opts() | {
         "extract_flat": "in_playlist",
         "noplaylist": False,
+        # Stop yt-dlp one entry past the limit instead of letting it
+        # page through the whole playlist first. Without this the
+        # server paid the full extraction cost of a several-thousand
+        # video playlist only to reject it, on an endpoint any
+        # unauthenticated caller can hit 30 times a minute.
+        "playlistend": MAX_PLAYLIST_SIZE + 1,
     }
 
     try:
@@ -145,9 +159,9 @@ def extract_playlist_info(url: str) -> PlaylistInfo:
 
     raw_entries = info.get("entries") or []
     if len(raw_entries) > MAX_PLAYLIST_SIZE:
-        raise YouTubeError(
-            f"Playlist exceeds the {MAX_PLAYLIST_SIZE}-video limit "
-            f"(found {len(raw_entries)})."
+        raise PlaylistTooLargeError(
+            f"This playlist has more than {MAX_PLAYLIST_SIZE} videos. "
+            "Open a smaller playlist, or download the videos individually."
         )
     entries = [
         PlaylistEntry(
