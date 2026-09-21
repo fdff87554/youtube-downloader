@@ -63,5 +63,5 @@ websockets==16.0
     # via uvicorn
 wrapt==2.1.2
     # via deprecated
-yt-dlp==2026.3.17
+yt-dlp==2026.8.19
     # via youtube-downloader-backend (backend/pyproject.toml)
