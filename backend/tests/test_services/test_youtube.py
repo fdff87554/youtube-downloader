@@ -445,6 +445,10 @@ class TestErrorMessageClassification:
             "ERROR: [youtube] abc: Private video. Sign in if you have access",
             "ERROR: [youtube] abc: Video unavailable",
             "ERROR: [youtube] abc: This video is not available.",
+            # Observed from the running service, not the yt-dlp source:
+            # a request for a missing video returns this wording, which
+            # an earlier narrowing of the markers stopped matching.
+            "ERROR: [youtube] AAAAAAAAAAA: This video is unavailable",
             "ERROR: [youtube] abc: This video has been removed for violating YouTube",
             "ERROR: This playlist is likely not available in your region.",
         ],

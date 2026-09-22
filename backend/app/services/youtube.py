@@ -49,11 +49,16 @@ STDERR_TAIL_LINES = 10
 # two things that are not a missing video: yt-dlp's "Requested format
 # is not available" (the video exists, the format does not) and
 # "Impersonate target is not available" (a dependency missing on our
-# side). Both were being reported to callers as 404. The phrases below
-# are the ones yt-dlp's YouTube extractors actually emit.
+# side). Both were being reported to callers as 404.
+#
+# The wordings differ more than the source strings suggest -- grepping
+# yt-dlp finds "Video unavailable", but a live request for a missing
+# video returns "This video is unavailable". Add observed phrasings
+# here rather than loosening the anchor.
 UNAVAILABLE_MARKERS = (
     "private video",
     "video unavailable",
+    "video is unavailable",
     "video is not available",
     "video has been removed",
     "not available in your region",
