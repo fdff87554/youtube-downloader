@@ -34,6 +34,13 @@ RUN apt-get update \
 # limited set of formats and may fail for some videos.
 COPY --from=deno-bin /deno /usr/local/bin/deno
 
+# Deno keeps its own JS analysis cache, which defaults to $HOME/.cache
+# and so wrote into the container filesystem on every download -- the
+# one thing yt-dlp's --no-cache-dir does not cover. Point it at /tmp,
+# which compose mounts as tmpfs, so nothing the runtime produces
+# outlives the container.
+ENV DENO_DIR=/tmp/deno
+
 # Copy Python dependencies
 COPY --from=backend-deps /install /usr/local
 

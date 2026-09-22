@@ -18,3 +18,10 @@ services:
       # client into one rate-limit bucket. See README "Configuration".
       - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
     restart: unless-stopped
+    # Enforce the no-disk-I/O invariant rather than trusting the code
+    # to honour it: the image is immutable at runtime and the only
+    # writable path is a tmpfs holding nginx's temp dirs, its pid file,
+    # the generated real-ip config and Deno's cache.
+    read_only: true
+    tmpfs:
+      - /tmp

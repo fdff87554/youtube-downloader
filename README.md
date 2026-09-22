@@ -225,6 +225,18 @@ this project does not configure.
 - Set `TRUSTED_PROXIES` to your proxy's network whenever one is in front
   of the container, or the built-in per-IP rate limits degrade into a
   single shared quota.
+- The container runs with a read-only root filesystem and a tmpfs on
+  `/tmp`. If you write your own compose file or run `docker run`
+  directly, carry both over: `--read-only --tmpfs /tmp`. Without the
+  tmpfs the container cannot start; without `--read-only` it still
+  works, but nothing then stops a write to the image layer.
+- What that guarantees precisely: **nothing is written to the
+  container's writable layer**. It is not a guarantee that no byte
+  reaches a disk — Docker's own
+  [tmpfs documentation](https://docs.docker.com/engine/storage/tmpfs/)
+  notes that "the temporary data may be written to a swap file, and
+  thereby persisted to the filesystem". If that matters for your
+  threat model, run the host without swap, or with encrypted swap.
 
 ## Troubleshooting
 
