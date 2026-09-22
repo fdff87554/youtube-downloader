@@ -16,8 +16,35 @@ from app.services.youtube import (
     build_download_filename,
     extract_playlist_info,
     extract_video_info,
+    normalize_youtube_url,
     validate_youtube_url,
 )
+
+
+def _permitted_extractors_for(url: str) -> list[str]:
+    """Extractor names that both match `url` and pass the allow-list.
+
+    Mirrors what YoutubeDL does at construction time: the configured
+    patterns are regexes matched against lowercased extractor names.
+    """
+    from yt_dlp.extractor import gen_extractor_classes
+    from yt_dlp.utils import orderedSet_from_options
+
+    from app.services.youtube import ALLOWED_EXTRACTORS
+
+    all_ies = {ie.IE_NAME.lower(): ie for ie in gen_extractor_classes()}
+    permitted = set(
+        orderedSet_from_options(
+            list(ALLOWED_EXTRACTORS),
+            {"all": list(all_ies), "default": list(all_ies)},
+            use_regex=True,
+        )
+    )
+    return [
+        name
+        for name, ie in all_ies.items()
+        if name in permitted and name != "generic" and ie.suitable(url)
+    ]
 
 
 class TestValidateYoutubeUrl:
@@ -59,6 +86,59 @@ class TestValidateYoutubeUrl:
     def test_plain_text_raises_error(self) -> None:
         with pytest.raises(InvalidURLError):
             validate_youtube_url("not a url at all")
+
+
+class TestNormalizeYoutubeUrl:
+    """Casing yt-dlp rejects must be fixed before it sees the URL."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (
+                "HTTPS://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            ),
+            (
+                "https://YOUTU.BE/dQw4w9WgXcQ",
+                "https://youtu.be/dQw4w9WgXcQ",
+            ),
+            (
+                "https://WWW.YouTube.com/playlist?list=PLabcDEF",
+                "https://www.youtube.com/playlist?list=PLabcDEF",
+            ),
+            (
+                "https://M.YouTube.com/watch?v=dQw4w9WgXcQ",
+                "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+            ),
+        ],
+    )
+    def test_lowercases_scheme_and_host(self, raw: str, expected: str) -> None:
+        assert normalize_youtube_url(raw) == expected
+
+    def test_preserves_case_in_path_and_query(self) -> None:
+        # Video and playlist IDs are case-sensitive; touching them
+        # would turn a valid URL into a 404.
+        url = "https://www.youtube.com/watch?v=Ab_Cd-EfGhI&list=PLxYzAbC"
+        assert normalize_youtube_url(url) == url
+
+    def test_already_normalised_url_is_unchanged(self) -> None:
+        url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        assert normalize_youtube_url(url) == url
+
+    def test_rejects_non_youtube_url(self) -> None:
+        with pytest.raises(InvalidURLError):
+            normalize_youtube_url("https://vimeo.com/12345")
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://YOUTUBE.COM.EVIL.COM/watch?v=x",
+            "https://youtube.com@evil.com/watch?v=x",
+        ],
+    )
+    def test_lookalike_hosts_are_still_rejected(self, url: str) -> None:
+        with pytest.raises(InvalidURLError):
+            normalize_youtube_url(url)
 
 
 class TestExtractVideoInfo:
@@ -316,7 +396,7 @@ class TestExtractorsRestricted:
     """
 
     def test_base_opts_name_the_allowed_extractors(self) -> None:
-        assert _base_opts()["allowed_extractors"] == ["youtube", "youtube:tab"]
+        assert _base_opts()["allowed_extractors"] == ["youtube.*"]
 
     def test_both_commands_restrict_extractors(self) -> None:
         for cmd in (
@@ -324,7 +404,36 @@ class TestExtractorsRestricted:
             _build_audio_command("https://www.youtube.com/watch?v=test"),
         ):
             assert "--use-extractors" in cmd
-            assert cmd[cmd.index("--use-extractors") + 1] == "youtube,youtube:tab"
+            assert cmd[cmd.index("--use-extractors") + 1] == "youtube.*"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLtest123456789",
+            "https://www.youtube.com/playlist?list=PLtest123456789",
+            "https://www.youtube.com/shorts/abcdefghijk",
+            "https://www.youtube.com/clip/UgkxABC123",
+            "https://www.youtube.com/@SomeChannel",
+        ],
+    )
+    def test_real_youtube_urls_reach_a_permitted_extractor(self, url: str) -> None:
+        # Guards against narrowing the allow-list until a legitimate URL
+        # form has no extractor left: youtu.be links with a list
+        # parameter are what YouTube's own share button produces from a
+        # playlist, and they need YoutubeYtBe.
+        assert _permitted_extractors_for(url), url
+
+    def test_non_youtube_paths_still_have_no_extractor(self) -> None:
+        # These fall through to generic, which follows redirects off
+        # YouTube -- the reason the allow-list exists.
+        for url in (
+            "https://www.youtube.com/about/xyz",
+            "https://www.youtube.com/t/terms",
+        ):
+            assert not _permitted_extractors_for(url), url
 
     def test_generic_extractor_is_not_allowed(self) -> None:
         for cmd in (
