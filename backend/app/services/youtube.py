@@ -496,12 +496,18 @@ def _finalize_process(
     """
     if process is None:
         return
-    # Before poll() or wait(), both of which reap: once the pid is
-    # released, _kill_process_group can no longer prove the group is
-    # ours and will refuse to signal it. Running first also covers the
-    # case where the child has exited but still holds its pid, which is
-    # where a surviving grandchild would be.
-    _kill_process_group(process)
+    # returncode, not poll(): reading the attribute tells us whether
+    # Popen has already reaped the child, while poll() would do the
+    # reaping itself and release the pid we are about to look up.
+    #
+    # Once reaped there is nothing left to signal -- the callers that
+    # reap do the group cleanup first, while the pid is still held --
+    # and the number may already belong to someone else, so signalling
+    # it could reach an unrelated process group. Still None means
+    # nobody has waited on this child, which is the disconnect path,
+    # and there the group does need taking down.
+    if process.returncode is None:
+        _kill_process_group(process)
     if process.stdout:
         with contextlib.suppress(Exception):
             process.stdout.close()
