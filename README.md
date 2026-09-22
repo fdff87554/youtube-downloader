@@ -208,7 +208,7 @@ is answered by FastAPI's own request validation with `422` and a
 
 ## What gets logged
 
-The container writes to stdout/stderr only; no log file is written
+The container writes logs to stdout/stderr only; no log file is written
 inside the image.
 
 - **Access log**: client IP, timestamp, method, path, status, response

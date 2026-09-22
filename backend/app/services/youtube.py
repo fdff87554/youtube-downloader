@@ -355,6 +355,12 @@ def _stream_mp3(url: str) -> Generator[bytes]:
                 break
             yield chunk
 
+        # Same ordering as the single-process path: reach each group
+        # while its leader still holds its pid.
+        for proc in (ytdlp_proc, ffmpeg_proc):
+            _await_exit_without_reaping(proc)
+            _kill_process_group(proc)
+
         # yt-dlp is checked first: when it fails, ffmpeg's own non-zero
         # exit is only a consequence of receiving a truncated stream,
         # and yt-dlp's stderr carries the reason worth reporting.
@@ -404,6 +410,12 @@ def _run_piped_process(
         # exit here means the download failed; without this the
         # generator would end normally and the caller would serve a
         # successful-looking but empty response.
+        #
+        # Clean the group up before reaping: yt-dlp can exit while the
+        # ffmpeg it started for muxing is still alive, and once the pid
+        # is released there is no safe way to reach that grandchild.
+        _await_exit_without_reaping(process)
+        _kill_process_group(process)
         if process.wait() != 0:
             _raise_from_subprocess_failure(
                 name, process.returncode, stderr_tail, drainer
@@ -465,6 +477,24 @@ def _raise_from_subprocess_failure(
     if _is_unavailable_message(detail):
         raise VideoNotFoundError(f"Video is unavailable: {detail}")
     raise YouTubeError(f"{name} failed: {detail}")
+
+
+def _await_exit_without_reaping(process: subprocess.Popen[bytes]) -> None:
+    """Block until the subprocess exits, leaving it unreaped.
+
+    WNOWAIT keeps the child in its zombie state, which keeps its pid
+    allocated. That is what makes the group cleanup that follows safe
+    *and* effective: while the pid is held it cannot have been reused,
+    so os.getpgid still identifies our group, and anything the child
+    spawned is still in it. Reaping first -- as Popen.wait does --
+    releases the pid, and then teardown can neither find the group nor
+    trust the number it was given.
+
+    Signals sent to a zombie are discarded, so the exit status the
+    caller reads afterwards is the one the child actually produced.
+    """
+    with contextlib.suppress(ChildProcessError):
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
 
 
 def _finalize_process(
