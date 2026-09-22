@@ -386,6 +386,48 @@ class TestConfigFilesIgnored:
             assert cmd[1] == "--ignore-config"
 
 
+class TestUnsupportedUrlClassification:
+    """A YouTube URL with no extractor is bad input, not a server fault."""
+
+    @patch("app.services.youtube.yt_dlp.YoutubeDL")
+    def test_no_suitable_extractor_raises_unsupported(
+        self, mock_ydl_cls: MagicMock
+    ) -> None:
+        import yt_dlp
+
+        from app.services.youtube import UnsupportedURLError
+
+        mock_ydl = MagicMock()
+        mock_ydl.extract_info.side_effect = yt_dlp.utils.DownloadError(
+            "ERROR: No suitable extractor found for URL "
+            "https://www.youtube.com/about/xyz"
+        )
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl_cls.return_value = mock_ydl
+
+        with pytest.raises(UnsupportedURLError):
+            extract_video_info("https://www.youtube.com/about/xyz")
+
+    @patch("app.services.youtube.yt_dlp.YoutubeDL")
+    def test_unavailable_video_is_still_not_found(
+        self, mock_ydl_cls: MagicMock
+    ) -> None:
+        # The more specific reason must not swallow this one.
+        import yt_dlp
+
+        mock_ydl = MagicMock()
+        mock_ydl.extract_info.side_effect = yt_dlp.utils.DownloadError(
+            "ERROR: Video unavailable"
+        )
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl_cls.return_value = mock_ydl
+
+        with pytest.raises(VideoNotFoundError):
+            extract_video_info("https://www.youtube.com/watch?v=private1")
+
+
 class TestExtractorsRestricted:
     """Only YouTube's own extractors may ever run.
 

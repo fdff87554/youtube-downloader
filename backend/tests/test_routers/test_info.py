@@ -91,6 +91,28 @@ class TestGetInfo:
         assert data["playlist_id"] == "PLtest"
 
 
+class TestUnsupportedUrl:
+    @patch("app.routers.info.extract_video_info")
+    def test_unsupported_youtube_url_returns_400(
+        self, mock_extract: MagicMock, client: TestClient
+    ) -> None:
+        # e.g. youtube.com/about/xyz: passes the host allow-list, but no
+        # permitted extractor claims it. Previously a 500.
+        from app.services.youtube import UnsupportedURLError
+
+        mock_extract.side_effect = UnsupportedURLError(
+            "No suitable extractor found for URL https://www.youtube.com/about/xyz"
+        )
+
+        response = client.get(
+            "/api/info",
+            params={"url": "https://www.youtube.com/about/xyz"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "unsupported_url"
+
+
 class TestEventLoopIsNotBlocked:
     """yt-dlp extraction must not run on the event loop thread."""
 

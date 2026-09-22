@@ -6,11 +6,12 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.limiter import limiter
-from app.routers.shared import error_response
+from app.routers.shared import UNSUPPORTED_URL_MESSAGE, error_response
 from app.schemas.video import ErrorEnvelope, PlaylistInfo, VideoInfo
 from app.services.youtube import (
     InvalidURLError,
     PlaylistTooLargeError,
+    UnsupportedURLError,
     VideoNotFoundError,
     YouTubeError,
     extract_playlist_info,
@@ -56,6 +57,13 @@ def get_info(
         return extract_video_info(url)
     except InvalidURLError as e:
         return error_response(400, "invalid_url", str(e))
+    except UnsupportedURLError as e:
+        return error_response(
+            400,
+            "unsupported_url",
+            UNSUPPORTED_URL_MESSAGE,
+            detail=str(e),
+        )
     except PlaylistTooLargeError as e:
         # The message names the limit, so the caller can act on it.
         return error_response(400, "playlist_too_large", str(e))

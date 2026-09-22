@@ -105,6 +105,28 @@ class TestDownloadVideo:
         assert response.json()["error"]["code"] == "not_found"
 
     @patch("app.routers.download.stream_download")
+    def test_download_of_unsupported_url_returns_400(
+        self,
+        mock_stream: MagicMock,
+        client,
+    ) -> None:
+        from app.services.youtube import UnsupportedURLError
+
+        def unsupported_generator():
+            raise UnsupportedURLError("No suitable extractor found for URL x")
+            yield b""  # pragma: no cover - makes this a generator
+
+        mock_stream.return_value = unsupported_generator()
+
+        response = client.get(
+            "/api/download",
+            params={"url": "https://www.youtube.com/about/xyz"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "unsupported_url"
+
+    @patch("app.routers.download.stream_download")
     def test_download_yielding_no_data_returns_404_not_empty_200(
         self,
         mock_stream: MagicMock,

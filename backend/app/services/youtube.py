@@ -46,6 +46,10 @@ MAX_PLAYLIST_SIZE = 200
 # line or two; the rest is progress noise.
 STDERR_TAIL_LINES = 10
 UNAVAILABLE_MARKERS = ("private", "unavailable", "not available")
+# yt-dlp says one of these when no permitted extractor claims the URL.
+# It happens for YouTube paths that are not media -- /about, /t/terms,
+# a mistyped path -- so it is the caller's input, not a server fault.
+UNSUPPORTED_URL_MARKERS = ("no suitable extractor", "unsupported url")
 # The host allow-list in YOUTUBE_URL_PATTERN validates the string the
 # caller sent; it cannot constrain where yt-dlp goes next. Paths that
 # YoutubeTabIE declines (about, t/terms, signin, results, ...) fall
@@ -73,6 +77,14 @@ class VideoNotFoundError(YouTubeError):
 
 class InvalidURLError(YouTubeError):
     """Raised when the provided URL is not a valid YouTube URL."""
+
+
+class UnsupportedURLError(YouTubeError):
+    """Raised when the URL is on YouTube but is not media we can fetch.
+
+    Like :class:`PlaylistTooLargeError`, this describes the caller's
+    input rather than a server failure, so callers map it to a 4xx.
+    """
 
 
 class PlaylistTooLargeError(YouTubeError):
@@ -448,6 +460,8 @@ def _raise_from_subprocess_failure(
     if drainer is not None:
         drainer.join(timeout=STDERR_DRAIN_TIMEOUT)
     detail = " | ".join(stderr_tail) or f"exited with code {returncode}"
+    if _is_unsupported_url_message(detail):
+        raise UnsupportedURLError(detail)
     if _is_unavailable_message(detail):
         raise VideoNotFoundError(f"Video is unavailable: {detail}")
     raise YouTubeError(f"{name} failed: {detail}")
@@ -647,7 +661,15 @@ def _is_unavailable_message(message: str) -> bool:
     return any(marker in lowered for marker in UNAVAILABLE_MARKERS)
 
 
+def _is_unsupported_url_message(message: str) -> bool:
+    """Whether an upstream error text means "no extractor wanted this"."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in UNSUPPORTED_URL_MARKERS)
+
+
 def _raise_from_download_error(e: yt_dlp.utils.DownloadError) -> None:
+    if _is_unsupported_url_message(str(e)):
+        raise UnsupportedURLError(str(e)) from e
     if _is_unavailable_message(str(e)):
         raise VideoNotFoundError(f"Video is unavailable: {e}") from e
     raise YouTubeError(f"Download error: {e}") from e
