@@ -16,6 +16,7 @@ from app.services.youtube import (
     build_download_filename,
     extract_playlist_info,
     extract_video_info,
+    normalize_youtube_url,
     validate_youtube_url,
 )
 
@@ -85,6 +86,59 @@ class TestValidateYoutubeUrl:
     def test_plain_text_raises_error(self) -> None:
         with pytest.raises(InvalidURLError):
             validate_youtube_url("not a url at all")
+
+
+class TestNormalizeYoutubeUrl:
+    """Casing yt-dlp rejects must be fixed before it sees the URL."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (
+                "HTTPS://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            ),
+            (
+                "https://YOUTU.BE/dQw4w9WgXcQ",
+                "https://youtu.be/dQw4w9WgXcQ",
+            ),
+            (
+                "https://WWW.YouTube.com/playlist?list=PLabcDEF",
+                "https://www.youtube.com/playlist?list=PLabcDEF",
+            ),
+            (
+                "https://M.YouTube.com/watch?v=dQw4w9WgXcQ",
+                "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+            ),
+        ],
+    )
+    def test_lowercases_scheme_and_host(self, raw: str, expected: str) -> None:
+        assert normalize_youtube_url(raw) == expected
+
+    def test_preserves_case_in_path_and_query(self) -> None:
+        # Video and playlist IDs are case-sensitive; touching them
+        # would turn a valid URL into a 404.
+        url = "https://www.youtube.com/watch?v=Ab_Cd-EfGhI&list=PLxYzAbC"
+        assert normalize_youtube_url(url) == url
+
+    def test_already_normalised_url_is_unchanged(self) -> None:
+        url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        assert normalize_youtube_url(url) == url
+
+    def test_rejects_non_youtube_url(self) -> None:
+        with pytest.raises(InvalidURLError):
+            normalize_youtube_url("https://vimeo.com/12345")
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://YOUTUBE.COM.EVIL.COM/watch?v=x",
+            "https://youtube.com@evil.com/watch?v=x",
+        ],
+    )
+    def test_lookalike_hosts_are_still_rejected(self, url: str) -> None:
+        with pytest.raises(InvalidURLError):
+            normalize_youtube_url(url)
 
 
 class TestExtractVideoInfo:

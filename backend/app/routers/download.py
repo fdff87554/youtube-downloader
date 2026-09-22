@@ -16,8 +16,8 @@ from app.services.youtube import (
     VideoNotFoundError,
     YouTubeError,
     build_download_filename,
+    normalize_youtube_url,
     stream_download,
-    validate_youtube_url,
 )
 
 router = APIRouter(prefix="/api", tags=["download"])
@@ -83,7 +83,7 @@ def download_video(
         StreamingResponse with the media content.
     """
     try:
-        validate_youtube_url(url)
+        url = normalize_youtube_url(url)
         filename = build_download_filename(title, fmt.value)
         media_type = MEDIA_TYPES[fmt]
         encoded_filename = quote(filename)
