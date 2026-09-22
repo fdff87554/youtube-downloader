@@ -196,8 +196,8 @@ Errors use a unified envelope:
 
 ## What gets logged
 
-The container writes to stdout/stderr only; nothing is persisted inside
-the image.
+The container writes logs to stdout/stderr only; no log file is written
+inside the image.
 
 - **Access log**: client IP, timestamp, method, path, status, response
   size and duration. Query strings are excluded, so the video URL and
