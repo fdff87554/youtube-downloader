@@ -19,6 +19,22 @@ dependencies = [
     "fastapi>=0.121.0,<0.142",
     "uvicorn[standard]>=0.30.0,<0.54",
     "yt-dlp==2026.8.19",
+    # The challenge solver scripts. Without them the Deno runtime the
+    # image ships is registered but has no script to run, and every
+    # YouTube extraction reports "Signature solving failed" and
+    # "n challenge solving failed".
+    #
+    # Declared directly rather than through yt-dlp's [default] or
+    # [pin] extras: both of those carry eight more packages (brotli,
+    # brotlicffi, certifi, mutagen, pycryptodomex, requests, urllib3,
+    # websockets) for networking backends and metadata handling this
+    # service does not use. The cost is that the version has to track
+    # yt-dlp by hand; test_ejs_matches_yt_dlp_requirement fails if it
+    # drifts from what the installed yt-dlp asks for.
+    #
+    # Not --remote-components ejs:npm|github, which would fetch
+    # unpinned scripts over the network on the download path.
+    "yt-dlp-ejs==0.8.0",
     "slowapi>=0.1.9,<0.2",
 ]
 
