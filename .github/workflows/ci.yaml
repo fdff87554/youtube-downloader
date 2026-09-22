@@ -39,7 +39,7 @@ jobs:
           key: ${{ runner.os }}-pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
       - name: Install backend dependencies
         run: |
-          pip install -r backend/requirements-dev.lock
+          pip install --require-hashes -r backend/requirements-dev.lock
           pip install -e backend --no-deps
       - name: Install frontend dependencies
         run: cd frontend && npm ci

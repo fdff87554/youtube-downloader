@@ -18,7 +18,8 @@ FROM python:3.14.7-slim-bookworm AS backend-deps
 WORKDIR /build
 RUN pip install --no-cache-dir --upgrade pip
 COPY backend/requirements.lock ./
-RUN pip install --no-cache-dir --prefix=/install -r requirements.lock
+RUN pip install --no-cache-dir --require-hashes --prefix=/install \
+    -r requirements.lock
 
 # Stage 3: Runtime
 FROM python:3.14.7-slim-bookworm
