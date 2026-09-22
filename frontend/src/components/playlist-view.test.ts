@@ -39,3 +39,33 @@ describe("createPlaylistView download button", () => {
     expect(features).toBe("noopener,noreferrer");
   });
 });
+
+describe("createPlaylistView escaping", () => {
+  const hostile = 'Clip " onerror="alert(1)';
+
+  it("keeps a quote in an entry title out of the surrounding attributes", () => {
+    const view = createPlaylistView(
+      {
+        ...samplePlaylist,
+        entries: [{ ...samplePlaylist.entries[0], title: hostile }],
+      },
+      () => ({ fmt: "mp4", quality: "best" }),
+    );
+
+    const entryTitle = view.querySelector<HTMLParagraphElement>("li p")!;
+    expect(entryTitle.getAttribute("onerror")).toBeNull();
+    expect(entryTitle.title).toBe(hostile);
+    expect(entryTitle.textContent).toBe(hostile);
+  });
+
+  it("keeps a quote in the playlist title out of the markup", () => {
+    const view = createPlaylistView(
+      { ...samplePlaylist, title: hostile },
+      () => ({ fmt: "mp4", quality: "best" }),
+    );
+
+    const heading = view.querySelector("h2")!;
+    expect(heading.getAttribute("onerror")).toBeNull();
+    expect(heading.textContent).toBe(hostile);
+  });
+});
