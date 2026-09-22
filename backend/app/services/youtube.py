@@ -42,7 +42,15 @@ UNAVAILABLE_MARKERS = ("private", "unavailable", "not available")
 # through to GenericIE, which fetches the URL and re-dispatches on the
 # final URL after redirects -- youtube.com/about/xyz ends up requesting
 # about.youtube. Naming the extractors keeps every request on YouTube.
-ALLOWED_EXTRACTORS = ("youtube", "youtube:tab")
+#
+# These are regexes matched against extractor names, not literal names
+# (yt_dlp/YoutubeDL.py: "allowed_extractors: List of regexes to match
+# against extractor names"). Listing "youtube" and "youtube:tab" matched
+# exactly two of the twenty YouTube extractors, so share links such as
+# youtu.be/<id>?list=<id> (YoutubeYtBe) and youtube.com/clip/<id>
+# (youtube:clip) were rejected outright. "youtube.*" covers all twenty
+# and still excludes generic, which is the one that leaves YouTube.
+ALLOWED_EXTRACTORS = ("youtube.*",)
 
 
 class YouTubeError(Exception):
