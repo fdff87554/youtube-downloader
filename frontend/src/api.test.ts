@@ -39,6 +39,23 @@ describe("isVideoInfo / isPlaylistInfo", () => {
   });
 });
 
+describe("type guards on unexpected bodies", () => {
+  // The guards run on whatever the network returned, so they must not
+  // be the thing that throws when it is not an object.
+  it.each([null, undefined, "a string", 42, true])(
+    "treats %p as neither video nor playlist",
+    (body) => {
+      expect(isVideoInfo(body)).toBe(false);
+      expect(isPlaylistInfo(body)).toBe(false);
+    },
+  );
+
+  it("treats an object without either id as neither", () => {
+    expect(isVideoInfo({ detail: [] })).toBe(false);
+    expect(isPlaylistInfo({ detail: [] })).toBe(false);
+  });
+});
+
 describe("formatDuration", () => {
   it("formats seconds shorter than an hour as m:ss", () => {
     expect(formatDuration(125)).toBe("2:05");
