@@ -46,6 +46,7 @@ COPY --from=frontend-build /build/dist /var/www/html
 
 # Copy nginx config
 COPY docker/nginx.conf /etc/nginx/nginx.conf
+COPY docker/security-headers.conf /etc/nginx/security-headers.conf
 
 # Copy entrypoint
 COPY docker/entrypoint.sh /entrypoint.sh

@@ -14,17 +14,27 @@ from app.limiter import limiter
 logger = logging.getLogger(__name__)
 
 
+def _debug_enabled() -> bool:
+    """Whether the app is running in development mode."""
+    return os.environ.get("DEBUG", "false").lower() == "true"
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
     Returns:
         Configured FastAPI instance with CORS middleware and exception handlers.
     """
+    # The interactive docs are a development aid, not part of the
+    # public surface: the page is unauthenticated and pulls Swagger UI
+    # from a third-party CDN, which a privacy-first self-hosted service
+    # should not make its visitors contact.
+    debug = _debug_enabled()
     app = FastAPI(
         title="YouTube Downloader API",
         version="0.1.0",
-        docs_url="/api/docs",
-        openapi_url="/api/openapi.json",
+        docs_url="/api/docs" if debug else None,
+        openapi_url="/api/openapi.json" if debug else None,
     )
 
     _configure_cors(app)
@@ -64,8 +74,7 @@ def _configure_cors(app: FastAPI) -> None:
             origin.strip() for origin in raw.split(",") if origin.strip()
         ]
     else:
-        debug = os.environ.get("DEBUG", "false").lower() == "true"
-        if not debug:
+        if not _debug_enabled():
             raise RuntimeError(
                 "ALLOWED_ORIGINS must be set explicitly in production. "
                 "Use a comma-separated list of origins (e.g. https://example.com), "
@@ -89,8 +98,7 @@ def _configure_exception_handlers(app: FastAPI) -> None:
         request: Request, exc: Exception
     ) -> JSONResponse:
         logger.exception("Unhandled exception")
-        debug = os.environ.get("DEBUG", "false").lower() == "true"
-        detail = str(exc) if debug else "Internal server error"
+        detail = str(exc) if _debug_enabled() else "Internal server error"
         return JSONResponse(
             status_code=500,
             content={"error": {"code": "internal_error", "message": detail}},
