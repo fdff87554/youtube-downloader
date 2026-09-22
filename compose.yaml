@@ -12,4 +12,9 @@ services:
       # refuses to start otherwise. See README "Quick start" for examples.
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
       - DEBUG=${DEBUG:-false}
+      # Comma-separated CIDRs of any reverse proxy in front of this
+      # container. Leave empty when the container is the edge. Getting
+      # this wrong does not fail loudly -- it silently merges every
+      # client into one rate-limit bucket. See README "Configuration".
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
     restart: unless-stopped
