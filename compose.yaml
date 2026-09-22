@@ -25,3 +25,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    # Ceilings for the subprocess-per-download model. nginx caps
+    # concurrent connections per client; these cap what the container
+    # as a whole can consume if that is not enough.
+    pids_limit: 256
+    mem_limit: 1g
