@@ -1,7 +1,9 @@
 #!/bin/bash
 set -e
 
-REAL_IP_CONF=/tmp/nginx-real-ip.conf
+# Overridable so the signal tests can point it at a FIFO and hold the
+# script inside write_real_ip_conf; nginx.conf includes the default.
+REAL_IP_CONF="${REAL_IP_CONF:-/tmp/nginx-real-ip.conf}"
 
 # Teach nginx which upstream proxies may speak for the client.
 #
@@ -27,8 +29,6 @@ write_real_ip_conf() {
 		>>"$REAL_IP_CONF"
 }
 
-write_real_ip_conf
-
 # Forward SIGTERM/SIGINT to the children so `docker stop` exits cleanly
 # instead of waiting for the stop timeout. Invoked only through the trap
 # below, which shellcheck cannot see.
@@ -37,7 +37,29 @@ shutdown() {
 	kill -TERM "$UVICORN_PID" "$NGINX_PID" 2>/dev/null || true
 	wait "$UVICORN_PID" "$NGINX_PID" 2>/dev/null || true
 }
-trap shutdown SIGTERM SIGINT EXIT
+
+# The signal traps exit instead of tearing down and returning. A handler
+# that returns hands control back to the line after the one the signal
+# interrupted, so a stop arriving during startup tore down whatever
+# existed and then went on to start the rest: measured at 6 of 10 runs,
+# nginx came up after the handler had already finished. A signal
+# arriving earlier still, before UVICORN_PID is set, would kill nothing
+# at all and leave the script blocking in `wait -n` on two healthy
+# services until the stop timeout SIGKILLed the container -- that one is
+# read off the code, not measured; the window is too narrow to hit
+# deliberately.
+#
+# Exiting routes teardown through the EXIT trap, which nothing can
+# follow. 128+signo is the conventional status for a signal-terminated
+# process, and 143 is what this script already returned for a SIGTERM
+# during normal operation, so the stop path keeps its exit code.
+trap 'exit 143' SIGTERM # 128 + SIGTERM (15)
+trap 'exit 130' SIGINT  # 128 + SIGINT (2)
+trap shutdown EXIT
+
+# After the traps, so a stop during config writing gets the handler
+# rather than bash's default disposition.
+write_real_ip_conf
 
 # --forwarded-allow-ips stays at the loopback nginx connects from: nginx
 # is the only process that may set X-Forwarded-For here, and it appends
