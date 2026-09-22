@@ -204,7 +204,7 @@ body. Clients should handle both shapes.
 
 ## What gets logged
 
-The container writes to stdout/stderr only; no log file is written
+The container writes logs to stdout/stderr only; no log file is written
 inside the image.
 
 - **Access log**: client IP, timestamp, method, path, status, response
