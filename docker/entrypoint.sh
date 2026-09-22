@@ -30,12 +30,14 @@ write_real_ip_conf() {
 write_real_ip_conf
 
 # Forward SIGTERM/SIGINT to the children so `docker stop` exits cleanly
-# instead of waiting for the stop timeout.
+# instead of waiting for the stop timeout. Invoked only through the trap
+# below, which shellcheck cannot see.
+# shellcheck disable=SC2329
 shutdown() {
 	kill -TERM "$UVICORN_PID" "$NGINX_PID" 2>/dev/null || true
 	wait "$UVICORN_PID" "$NGINX_PID" 2>/dev/null || true
 }
-trap shutdown SIGTERM SIGINT
+trap shutdown SIGTERM SIGINT EXIT
 
 # --forwarded-allow-ips stays at the loopback nginx connects from: nginx
 # is the only process that may set X-Forwarded-For here, and it appends
@@ -55,7 +57,11 @@ NGINX_PID=$!
 
 # Exit as soon as either process dies, then make sure the other one is
 # torn down before the container exits so we don't leak orphans.
-wait -n
-EXIT_CODE=$?
-shutdown
-exit "$EXIT_CODE"
+#
+# `|| EXIT_CODE=$?` is what makes the teardown reachable: under `set -e`
+# a non-zero `wait -n` aborted the script on the spot, so neither the
+# assignment nor the shutdown below ever ran -- including on the one
+# path that needs them, uvicorn refusing to start without
+# ALLOWED_ORIGINS. The EXIT trap covers the remaining early exits.
+wait -n || EXIT_CODE=$?
+exit "${EXIT_CODE:-0}"
