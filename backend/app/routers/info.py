@@ -6,9 +6,14 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.limiter import limiter
-from app.routers.shared import UNSUPPORTED_URL_MESSAGE, error_response
+from app.routers.shared import (
+    FORMAT_UNAVAILABLE_MESSAGE,
+    UNSUPPORTED_URL_MESSAGE,
+    error_response,
+)
 from app.schemas.video import ErrorEnvelope, PlaylistInfo, VideoInfo
 from app.services.youtube import (
+    FormatUnavailableError,
     InvalidURLError,
     PlaylistTooLargeError,
     UnsupportedURLError,
@@ -57,6 +62,13 @@ def get_info(
         return extract_video_info(url)
     except InvalidURLError as e:
         return error_response(400, "invalid_url", str(e))
+    except FormatUnavailableError as e:
+        return error_response(
+            400,
+            "format_unavailable",
+            FORMAT_UNAVAILABLE_MESSAGE,
+            detail=str(e),
+        )
     except UnsupportedURLError as e:
         return error_response(
             400,

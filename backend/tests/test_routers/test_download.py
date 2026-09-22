@@ -127,6 +127,30 @@ class TestDownloadVideo:
         assert response.json()["error"]["code"] == "unsupported_url"
 
     @patch("app.routers.download.stream_download")
+    def test_download_of_unavailable_format_returns_400(
+        self,
+        mock_stream: MagicMock,
+        client,
+    ) -> None:
+        # Asking for 1080 on a video that has no such format is about
+        # the request, not a missing video, so it must not be a 404.
+        from app.services.youtube import FormatUnavailableError
+
+        def no_such_format():
+            raise FormatUnavailableError("Requested format is not available")
+            yield b""  # pragma: no cover - makes this a generator
+
+        mock_stream.return_value = no_such_format()
+
+        response = client.get(
+            "/api/download",
+            params={"url": "https://www.youtube.com/watch?v=test", "quality": "1080"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "format_unavailable"
+
+    @patch("app.routers.download.stream_download")
     def test_download_yielding_no_data_returns_404_not_empty_200(
         self,
         mock_stream: MagicMock,

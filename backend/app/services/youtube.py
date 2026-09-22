@@ -45,7 +45,22 @@ MAX_PLAYLIST_SIZE = 200
 # in the error surfaced to the caller. yt-dlp puts the reason on the last
 # line or two; the rest is progress noise.
 STDERR_TAIL_LINES = 10
-UNAVAILABLE_MARKERS = ("private", "unavailable", "not available")
+# Anchored on the subject, because a bare "not available" also matches
+# two things that are not a missing video: yt-dlp's "Requested format
+# is not available" (the video exists, the format does not) and
+# "Impersonate target is not available" (a dependency missing on our
+# side). Both were being reported to callers as 404. The phrases below
+# are the ones yt-dlp's YouTube extractors actually emit.
+UNAVAILABLE_MARKERS = (
+    "private video",
+    "video unavailable",
+    "video is not available",
+    "video has been removed",
+    "not available in your region",
+)
+# Checked before UNAVAILABLE_MARKERS: the video is there, the quality
+# the caller asked for is not.
+FORMAT_UNAVAILABLE_MARKERS = ("requested format is not available",)
 # yt-dlp says one of these when no permitted extractor claims the URL.
 # It happens for YouTube paths that are not media -- /about, /t/terms,
 # a mistyped path -- so it is the caller's input, not a server fault.
@@ -77,6 +92,14 @@ class VideoNotFoundError(YouTubeError):
 
 class InvalidURLError(YouTubeError):
     """Raised when the provided URL is not a valid YouTube URL."""
+
+
+class FormatUnavailableError(YouTubeError):
+    """Raised when the video exists but not in the requested quality.
+
+    Like :class:`UnsupportedURLError`, this describes what the caller
+    asked for rather than a server failure, so callers map it to a 4xx.
+    """
 
 
 class UnsupportedURLError(YouTubeError):
@@ -474,6 +497,8 @@ def _raise_from_subprocess_failure(
     detail = " | ".join(stderr_tail) or f"exited with code {returncode}"
     if _is_unsupported_url_message(detail):
         raise UnsupportedURLError(detail)
+    if _is_format_unavailable_message(detail):
+        raise FormatUnavailableError(detail)
     if _is_unavailable_message(detail):
         raise VideoNotFoundError(f"Video is unavailable: {detail}")
     raise YouTubeError(f"{name} failed: {detail}")
@@ -712,6 +737,12 @@ def _is_unavailable_message(message: str) -> bool:
     return any(marker in lowered for marker in UNAVAILABLE_MARKERS)
 
 
+def _is_format_unavailable_message(message: str) -> bool:
+    """Whether an upstream error text means "not in that quality"."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in FORMAT_UNAVAILABLE_MARKERS)
+
+
 def _is_unsupported_url_message(message: str) -> bool:
     """Whether an upstream error text means "no extractor wanted this"."""
     lowered = message.lower()
@@ -721,6 +752,8 @@ def _is_unsupported_url_message(message: str) -> bool:
 def _raise_from_download_error(e: yt_dlp.utils.DownloadError) -> None:
     if _is_unsupported_url_message(str(e)):
         raise UnsupportedURLError(str(e)) from e
+    if _is_format_unavailable_message(str(e)):
+        raise FormatUnavailableError(str(e)) from e
     if _is_unavailable_message(str(e)):
         raise VideoNotFoundError(f"Video is unavailable: {e}") from e
     raise YouTubeError(f"Download error: {e}") from e
