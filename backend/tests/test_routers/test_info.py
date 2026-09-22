@@ -205,3 +205,29 @@ class TestRateLimit:
         assert last_response is not None
         assert last_response.status_code == 429
         assert last_response.json()["error"]["code"] == "rate_limited"
+
+    @patch("app.routers.info.extract_video_info")
+    def test_429_tells_the_client_when_to_retry(
+        self, mock_extract: MagicMock, client: TestClient
+    ) -> None:
+        mock_extract.return_value = VideoInfo(
+            video_id="test",
+            title="Test",
+            thumbnail="",
+            duration=10,
+            uploader="x",
+            formats=[],
+        )
+
+        last_response = None
+        for _ in range(31):
+            last_response = client.get(
+                "/api/info",
+                params={"url": "https://www.youtube.com/watch?v=test"},
+            )
+            if last_response.status_code == 429:
+                break
+
+        assert last_response is not None
+        assert last_response.status_code == 429
+        assert last_response.headers["retry-after"] == "60"

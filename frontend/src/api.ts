@@ -59,8 +59,14 @@ export function isVideoInfo(info: InfoResponse): info is VideoInfo {
 
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    const body: ApiError = await response.json();
-    throw new Error(body.error.message);
+    // Not every error reaches us as the API envelope: an edge proxy or
+    // a network appliance can answer with HTML, and FastAPI's own
+    // validation errors use {"detail": ...}. Parsing either of those
+    // blindly threw a SyntaxError or TypeError whose text ended up in
+    // front of the user instead of something actionable.
+    const body = await response.json().catch(() => null);
+    const message = (body as ApiError | null)?.error?.message;
+    throw new Error(message ?? `Request failed (HTTP ${response.status}).`);
   }
   return response.json();
 }

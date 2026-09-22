@@ -134,3 +134,46 @@ describe("fetchInfo timeout", () => {
     expect(clearSpy).toHaveBeenCalled();
   });
 });
+
+describe("fetchInfo error bodies", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockResponse(body: string, status: number, contentType: string) {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(body, { status, headers: { "content-type": contentType } }),
+    );
+  }
+
+  it("surfaces the message from the API error envelope", async () => {
+    mockResponse(
+      JSON.stringify({ error: { code: "invalid_url", message: "Bad URL." } }),
+      400,
+      "application/json",
+    );
+
+    await expect(fetchInfo("https://www.youtube.com/watch?v=x")).rejects.toThrow(
+      "Bad URL.",
+    );
+  });
+
+  it("reports the status when the body is HTML rather than JSON", async () => {
+    // An edge proxy answering 429 with its stock HTML page used to
+    // surface as "Unexpected token '<' ... is not valid JSON".
+    mockResponse("<html><body>429</body></html>", 429, "text/html");
+
+    await expect(
+      fetchInfo("https://www.youtube.com/watch?v=x"),
+    ).rejects.toThrow("Request failed (HTTP 429).");
+  });
+
+  it("reports the status when the JSON has no error envelope", async () => {
+    // FastAPI's own validation errors use {"detail": [...]}.
+    mockResponse(JSON.stringify({ detail: [] }), 422, "application/json");
+
+    await expect(
+      fetchInfo("https://www.youtube.com/watch?v=x"),
+    ).rejects.toThrow("Request failed (HTTP 422).");
+  });
+});
