@@ -4,7 +4,6 @@ import {
   FETCH_INFO_TIMEOUT_MS,
   fetchInfo,
   formatDuration,
-  formatFileSize,
   isPlaylistInfo,
   isVideoInfo,
   type PlaylistInfo,
@@ -40,6 +39,39 @@ describe("isVideoInfo / isPlaylistInfo", () => {
   });
 });
 
+describe("type guards on unexpected bodies", () => {
+  // The guards run on whatever the network returned, so they must not
+  // be the thing that throws when it is not an object.
+  it.each([null, undefined, "a string", 42, true])(
+    "treats %p as neither video nor playlist",
+    (body) => {
+      expect(isVideoInfo(body)).toBe(false);
+      expect(isPlaylistInfo(body)).toBe(false);
+    },
+  );
+
+  it("treats an object without either id as neither", () => {
+    expect(isVideoInfo({ detail: [] })).toBe(false);
+    expect(isPlaylistInfo({ detail: [] })).toBe(false);
+  });
+
+  it("rejects a playlist body whose entries array is missing", () => {
+    // createPlaylistView iterates entries, so letting this through
+    // threw "info.entries is not iterable" out of the render instead
+    // of showing the unrecognised-response message.
+    expect(isPlaylistInfo({ playlist_id: "p1" })).toBe(false);
+  });
+
+  it("rejects a playlist body whose entries is not an array", () => {
+    expect(isPlaylistInfo({ playlist_id: "p1", entries: null })).toBe(false);
+    expect(isPlaylistInfo({ playlist_id: "p1", entries: "nope" })).toBe(false);
+  });
+
+  it("accepts a playlist body with an empty entries array", () => {
+    expect(isPlaylistInfo({ playlist_id: "p1", entries: [] })).toBe(true);
+  });
+});
+
 describe("formatDuration", () => {
   it("formats seconds shorter than an hour as m:ss", () => {
     expect(formatDuration(125)).toBe("2:05");
@@ -51,20 +83,6 @@ describe("formatDuration", () => {
 
   it("renders zero as 0:00", () => {
     expect(formatDuration(0)).toBe("0:00");
-  });
-});
-
-describe("formatFileSize", () => {
-  it("returns empty string for null", () => {
-    expect(formatFileSize(null)).toBe("");
-  });
-
-  it("formats megabyte-scale sizes in MB", () => {
-    expect(formatFileSize(1024 * 1024 * 5)).toBe("5.0 MB");
-  });
-
-  it("formats gigabyte-scale sizes in GB", () => {
-    expect(formatFileSize(1024 * 1024 * 1024 * 2.5)).toBe("2.5 GB");
   });
 });
 

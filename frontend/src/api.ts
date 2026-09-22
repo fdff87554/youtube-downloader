@@ -49,12 +49,27 @@ export interface ApiError {
 
 export type InfoResponse = VideoInfo | PlaylistInfo;
 
-export function isPlaylistInfo(info: InfoResponse): info is PlaylistInfo {
-  return "playlist_id" in info;
+// These take `unknown` rather than InfoResponse on purpose: they run
+// against whatever the network actually returned. `in` throws on null
+// and on primitives, so with the narrower type the guard itself was
+// the thing that failed on an unexpected body, and the caller's
+// friendly "unrecognised response" branch was unreachable.
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
-export function isVideoInfo(info: InfoResponse): info is VideoInfo {
-  return "video_id" in info && !("playlist_id" in info);
+export function isPlaylistInfo(info: unknown): info is PlaylistInfo {
+  // entries is checked, not just playlist_id: createPlaylistView
+  // iterates it, so a body carrying the id without the array made the
+  // render throw "info.entries is not iterable" rather than reaching
+  // the unrecognised-response branch. The other fields are left to the
+  // backend's response model; missing scalars degrade to empty text
+  // instead of failing.
+  return isObject(info) && "playlist_id" in info && Array.isArray(info.entries);
+}
+
+export function isVideoInfo(info: unknown): info is VideoInfo {
+  return isObject(info) && "video_id" in info && !("playlist_id" in info);
 }
 
 async function handleResponse<T>(response: Response): Promise<T> {
@@ -116,13 +131,4 @@ export function formatDuration(seconds: number): string {
     return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   }
   return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-export function formatFileSize(bytes: number | null): string {
-  if (bytes === null) return "";
-  const mb = bytes / (1024 * 1024);
-  if (mb >= 1024) {
-    return `${(mb / 1024).toFixed(1)} GB`;
-  }
-  return `${mb.toFixed(1)} MB`;
 }
