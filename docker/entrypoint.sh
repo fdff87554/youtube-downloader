@@ -1,9 +1,18 @@
 #!/bin/bash
 set -e
 
-# Overridable so the signal tests can point it at a FIFO and hold the
-# script inside write_real_ip_conf; nginx.conf includes the default.
-REAL_IP_CONF="${REAL_IP_CONF:-/tmp/nginx-real-ip.conf}"
+# Not an operator knob, which is why the override is named for the only
+# thing that uses it. nginx.conf includes this path literally, so
+# writing the file anywhere else leaves nginx with nothing to include
+# and it refuses to start:
+#
+#   [emerg] open() "/tmp/nginx-real-ip.conf" failed (2: No such file or
+#   directory) in /etc/nginx/nginx.conf:47
+#
+# docker/entrypoint.test.sh points it at a FIFO to hold the script
+# inside write_real_ip_conf, which is the only way to land a signal in
+# the window between the traps and the first service.
+REAL_IP_CONF="${REAL_IP_CONF_FOR_TESTS:-/tmp/nginx-real-ip.conf}"
 
 # Teach nginx which upstream proxies may speak for the client.
 #

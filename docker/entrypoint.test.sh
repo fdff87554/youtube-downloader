@@ -75,7 +75,7 @@ test_signal_during_normal_operation() {
 	echo "signal $signal while running -> exit $expected, children reaped"
 	setup
 
-	PATH="$WORK/bin:$PATH" REAL_IP_CONF="$WORK/real-ip.conf" \
+	PATH="$WORK/bin:$PATH" REAL_IP_CONF_FOR_TESTS="$WORK/real-ip.conf" \
 		timeout -k 2 "$RUN_TIMEOUT" bash "$ENTRYPOINT" >/dev/null 2>&1 &
 	local script=$!
 
@@ -100,7 +100,7 @@ test_signal_during_normal_operation() {
 
 # The regression: a signal arriving before the services are up.
 #
-# REAL_IP_CONF points at a FIFO, so the script blocks in
+# REAL_IP_CONF_FOR_TESTS points at a FIFO, so the script blocks in
 # write_real_ip_conf -- after the traps are installed and before either
 # service starts, which is the window the old handler mishandled.
 # Opening a FIFO for writing blocks until a reader appears, and no
@@ -111,7 +111,7 @@ test_signal_before_the_services_start() {
 	setup
 	mkfifo "$WORK/real-ip.fifo"
 
-	PATH="$WORK/bin:$PATH" REAL_IP_CONF="$WORK/real-ip.fifo" \
+	PATH="$WORK/bin:$PATH" REAL_IP_CONF_FOR_TESTS="$WORK/real-ip.fifo" \
 		timeout -k 2 "$RUN_TIMEOUT" bash "$ENTRYPOINT" >/dev/null 2>&1 &
 	local script=$!
 
