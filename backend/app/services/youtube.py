@@ -11,6 +11,7 @@ import threading
 from collections import deque
 from collections.abc import Generator
 from typing import IO, Any, NoReturn
+from urllib.parse import urlsplit, urlunsplit
 
 import yt_dlp
 
@@ -47,7 +48,15 @@ UNAVAILABLE_MARKERS = ("private", "unavailable", "not available")
 # through to GenericIE, which fetches the URL and re-dispatches on the
 # final URL after redirects -- youtube.com/about/xyz ends up requesting
 # about.youtube. Naming the extractors keeps every request on YouTube.
-ALLOWED_EXTRACTORS = ("youtube", "youtube:tab")
+#
+# These are regexes matched against extractor names, not literal names
+# (yt_dlp/YoutubeDL.py: "allowed_extractors: List of regexes to match
+# against extractor names"). Listing "youtube" and "youtube:tab" matched
+# exactly two of the twenty YouTube extractors, so share links such as
+# youtu.be/<id>?list=<id> (YoutubeYtBe) and youtube.com/clip/<id>
+# (youtube:clip) were rejected outright. "youtube.*" covers all twenty
+# and still excludes generic, which is the one that leaves YouTube.
+ALLOWED_EXTRACTORS = ("youtube.*",)
 
 
 class YouTubeError(Exception):
@@ -73,6 +82,10 @@ class PlaylistTooLargeError(YouTubeError):
 def validate_youtube_url(url: str) -> None:
     """Validate that a URL points to YouTube.
 
+    Callers that go on to hand the URL to yt-dlp should use
+    :func:`normalize_youtube_url` instead, which validates and also
+    fixes up the casing yt-dlp is picky about.
+
     Args:
         url: The URL to validate.
 
@@ -81,6 +94,38 @@ def validate_youtube_url(url: str) -> None:
     """
     if not YOUTUBE_URL_PATTERN.match(url):
         raise InvalidURLError("URL must be a valid YouTube URL.")
+
+
+def normalize_youtube_url(url: str) -> str:
+    """Validate a YouTube URL and lowercase its scheme and host.
+
+    Our pattern accepts any casing, because scheme and host are
+    case-insensitive per RFC 3986 sections 3.1 and 3.2.2. yt-dlp's
+    extractor patterns are not: "HTTPS://www.youtube.com/watch?v=x",
+    "https://YOUTU.BE/x" and "https://WWW.YouTube.com/playlist?list=x"
+    all passed validation and then failed with "No suitable extractor
+    found", which the API reported as a 500. Lowercasing those two
+    components makes the two layers agree.
+
+    Only scheme and host are touched. Path and query keep their casing:
+    video and playlist IDs are case-sensitive.
+
+    Args:
+        url: The URL to validate and normalise.
+
+    Returns:
+        The URL with a lowercase scheme and host.
+
+    Raises:
+        InvalidURLError: If the URL is not a valid YouTube URL.
+    """
+    validate_youtube_url(url)
+    parts = urlsplit(url)
+    # The pattern guarantees the host is followed immediately by "/",
+    # so netloc holds no userinfo or port and is safe to lowercase whole.
+    return urlunsplit(
+        parts._replace(scheme=parts.scheme.lower(), netloc=parts.netloc.lower())
+    )
 
 
 def extract_video_info(url: str) -> VideoInfo:
@@ -97,7 +142,7 @@ def extract_video_info(url: str) -> VideoInfo:
         VideoNotFoundError: If the video cannot be found.
         YouTubeError: For other extraction failures.
     """
-    validate_youtube_url(url)
+    url = normalize_youtube_url(url)
 
     ydl_opts = _base_opts() | {"noplaylist": True}
 
@@ -138,7 +183,7 @@ def extract_playlist_info(url: str) -> PlaylistInfo:
         VideoNotFoundError: If the playlist cannot be found.
         YouTubeError: For other extraction failures.
     """
-    validate_youtube_url(url)
+    url = normalize_youtube_url(url)
 
     ydl_opts = _base_opts() | {
         "extract_flat": "in_playlist",
@@ -213,7 +258,7 @@ def stream_download(
         InvalidURLError: If the URL is not a valid YouTube URL.
         YouTubeError: For download failures.
     """
-    validate_youtube_url(url)
+    url = normalize_youtube_url(url)
 
     if format_type == "mp3":
         yield from _stream_mp3(url)
