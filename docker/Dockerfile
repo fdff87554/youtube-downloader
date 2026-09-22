@@ -12,8 +12,9 @@ COPY frontend/ .
 RUN npm run build
 
 # Stage 2: Install backend dependencies from the pinned lockfile.
-# The application package itself is mounted via PYTHONPATH in stage 3, so we only
-# need the third-party dependencies here.
+# The application package itself is not installed: stage 3 copies app/
+# into WORKDIR, which uvicorn picks up through the working directory
+# already being on sys.path. Only third-party dependencies are needed here.
 FROM python:3.14.7-slim-bookworm AS backend-deps
 WORKDIR /build
 RUN pip install --no-cache-dir --upgrade pip
