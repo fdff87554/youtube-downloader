@@ -36,6 +36,21 @@ MAX_PLAYLIST_SIZE = 200
 # line or two; the rest is progress noise.
 STDERR_TAIL_LINES = 10
 UNAVAILABLE_MARKERS = ("private", "unavailable", "not available")
+# The host allow-list in YOUTUBE_URL_PATTERN validates the string the
+# caller sent; it cannot constrain where yt-dlp goes next. Paths that
+# YoutubeTabIE declines (about, t/terms, signin, results, ...) fall
+# through to GenericIE, which fetches the URL and re-dispatches on the
+# final URL after redirects -- youtube.com/about/xyz ends up requesting
+# about.youtube. Naming the extractors keeps every request on YouTube.
+#
+# These are regexes matched against extractor names, not literal names
+# (yt_dlp/YoutubeDL.py: "allowed_extractors: List of regexes to match
+# against extractor names"). Listing "youtube" and "youtube:tab" matched
+# exactly two of the twenty YouTube extractors, so share links such as
+# youtu.be/<id>?list=<id> (YoutubeYtBe) and youtube.com/clip/<id>
+# (youtube:clip) were rejected outright. "youtube.*" covers all twenty
+# and still excludes generic, which is the one that leaves YouTube.
+ALLOWED_EXTRACTORS = ("youtube.*",)
 
 
 class YouTubeError(Exception):
@@ -428,6 +443,8 @@ def _build_audio_command(url: str) -> list[str]:
     return [
         "yt-dlp",
         "--ignore-config",
+        "--use-extractors",
+        ",".join(ALLOWED_EXTRACTORS),
         "--no-playlist",
         "-f",
         "bestaudio/best",
@@ -447,6 +464,8 @@ def _build_video_command(url: str, quality: str) -> list[str]:
     return [
         "yt-dlp",
         "--ignore-config",
+        "--use-extractors",
+        ",".join(ALLOWED_EXTRACTORS),
         "--no-playlist",
         "-f",
         format_spec,
@@ -488,6 +507,7 @@ def _base_opts() -> dict[str, Any]:
         "quiet": True,
         "no_warnings": True,
         "socket_timeout": SOCKET_TIMEOUT,
+        "allowed_extractors": list(ALLOWED_EXTRACTORS),
         # Disable yt-dlp's player JS cache so the service writes nothing
         # to ~/.cache/yt-dlp at runtime.
         "cachedir": False,
