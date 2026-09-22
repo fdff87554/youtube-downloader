@@ -516,6 +516,39 @@ class TestKillProcessGroup:
         mock_killpg.assert_not_called()
         mock_logger.error.assert_called_once()
 
+    def test_teardown_skips_the_group_once_the_child_is_reaped(self) -> None:
+        # The streaming paths clean the group up before reaping, so a
+        # second attempt afterwards finds nothing of ours: the pid has
+        # been released and the number may now belong to someone else.
+        process = self._process()
+        process.returncode = 0
+        process.stdout = None
+
+        with (
+            patch("app.services.youtube.os.getpgid") as mock_getpgid,
+            patch("app.services.youtube.os.killpg") as mock_killpg,
+        ):
+            _finalize_process("fake", process, drainer=None)
+
+        mock_getpgid.assert_not_called()
+        mock_killpg.assert_not_called()
+
+    def test_teardown_signals_the_group_when_nobody_has_reaped(self) -> None:
+        # The client-disconnect path: the generator is closed at the
+        # yield, so no one waited on the child and the group is still
+        # ours to take down.
+        process = self._process()
+        process.returncode = None
+        process.stdout = None
+
+        with (
+            patch("app.services.youtube.os.getpgid", return_value=4242),
+            patch("app.services.youtube.os.killpg") as mock_killpg,
+        ):
+            _finalize_process("fake", process, drainer=None)
+
+        mock_killpg.assert_called_once_with(4242, signal.SIGKILL)
+
     def test_signals_the_group_of_a_live_child(self) -> None:
         with (
             patch("app.services.youtube.os.getpgid", return_value=4242),
