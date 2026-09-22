@@ -194,6 +194,25 @@ Errors use a unified envelope:
 }
 ```
 
+## What gets logged
+
+The container writes logs to stdout/stderr only; no log file is written
+inside the image.
+
+- **Access log**: client IP, timestamp, method, path, status, response
+  size and duration. Query strings are excluded, so the video URL and
+  title a visitor requested do not appear in this log.
+- **nginx error log**: nginx writes its own diagnostics (rate-limit
+  rejections, upstream failures) with the **full request line**, query
+  string included. So a rate-limited request does record which video
+  was asked for. Only the access log format is under this project's
+  control; nginx does not offer a format for these entries.
+- **Application log**: warnings and errors, including `yt-dlp` stderr
+  when a download fails. A failing URL can appear here.
+
+How long any of this is kept is up to your container log driver, which
+this project does not configure.
+
 ## Deployment notes
 
 - The container listens on port `8080` inside the network. Expose it as
