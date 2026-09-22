@@ -11,6 +11,7 @@ import subprocess
 import threading
 from collections import deque
 from collections.abc import Generator
+from dataclasses import dataclass
 from typing import IO, Any, NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
@@ -278,6 +279,19 @@ def extract_playlist_info(url: str) -> PlaylistInfo:
     )
 
 
+@dataclass
+class _SupervisedProcess:
+    """A registered subprocess and the thread draining its stderr.
+
+    Mutable because the drainer is attached after registration: see
+    ``DownloadProcesses.register``.
+    """
+
+    name: str
+    process: subprocess.Popen[bytes]
+    drainer: threading.Thread | None
+
+
 class DownloadProcesses:
     """Handle on the subprocesses behind one download stream.
 
@@ -302,20 +316,33 @@ class DownloadProcesses:
     """
 
     def __init__(self) -> None:
-        self._entries: list[
-            tuple[str, subprocess.Popen[bytes], threading.Thread | None]
-        ] = []
+        self._entries: list[_SupervisedProcess] = []
         self._lock = threading.Lock()
 
     def register(
         self,
         name: str,
         process: subprocess.Popen[bytes],
-        drainer: threading.Thread | None,
-    ) -> None:
-        """Record a live subprocess for ``close`` to finalize."""
+        tail: deque[str],
+    ) -> threading.Thread | None:
+        """Take ownership of a process and start draining its stderr.
+
+        Starting the drainer is done here, after the process is already
+        recorded, because ``Thread.start()`` can raise and a process
+        nobody has recorded is a process nobody can kill -- which is
+        the leak this class exists to prevent. Leaving that ordering to
+        the call sites is what let it regress once already.
+
+        Returns the drainer so the caller can join it before reporting
+        a non-zero exit. If ``close`` happens to run in the window
+        before the drainer is attached, that thread is not joined; it is
+        a daemon that ends at stderr EOF once the process is killed.
+        """
+        entry = _SupervisedProcess(name, process, None)
         with self._lock:
-            self._entries.append((name, process, drainer))
+            self._entries.append(entry)
+        entry.drainer = _start_stderr_drainer(name, process, tail)
+        return entry.drainer
 
     def close(self) -> None:
         """Finalize every registered subprocess, newest first.
@@ -325,8 +352,8 @@ class DownloadProcesses:
         """
         with self._lock:
             pending, self._entries = self._entries, []
-            for name, process, drainer in reversed(pending):
-                _finalize_process(name, process, drainer)
+            for entry in reversed(pending):
+                _finalize_process(entry.name, entry.process, entry.drainer)
 
 
 def stream_download(
@@ -411,10 +438,9 @@ def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
-            ytdlp_drainer = _start_stderr_drainer("yt-dlp", ytdlp_proc, ytdlp_tail)
             # Registered before ffmpeg starts: if ffmpeg turns out to be
             # missing, this is the only handle that can still reach yt-dlp.
-            processes.register("yt-dlp", ytdlp_proc, ytdlp_drainer)
+            ytdlp_drainer = processes.register("yt-dlp", ytdlp_proc, ytdlp_tail)
 
             ffmpeg_proc = subprocess.Popen(
                 ffmpeg_cmd,
@@ -423,8 +449,7 @@ def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
-            ffmpeg_drainer = _start_stderr_drainer("ffmpeg", ffmpeg_proc, ffmpeg_tail)
-            processes.register("ffmpeg", ffmpeg_proc, ffmpeg_drainer)
+            ffmpeg_drainer = processes.register("ffmpeg", ffmpeg_proc, ffmpeg_tail)
         except FileNotFoundError as e:
             raise YouTubeError(
                 "yt-dlp or ffmpeg is not installed or not in PATH."
@@ -486,8 +511,7 @@ def _run_piped_process(
         except FileNotFoundError as e:
             raise YouTubeError("yt-dlp is not installed or not in PATH.") from e
 
-        drainer = _start_stderr_drainer(name, process, stderr_tail)
-        processes.register(name, process, drainer)
+        drainer = processes.register(name, process, stderr_tail)
 
         if process.stdout is None:
             raise YouTubeError("Failed to open stdout pipe.")

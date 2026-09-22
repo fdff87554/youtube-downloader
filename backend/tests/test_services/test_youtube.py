@@ -1,6 +1,7 @@
 """Unit tests for the YouTube service layer."""
 
 import signal
+from collections import deque
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -733,17 +734,29 @@ class TestDownloadProcesses:
     Teardown of a registered process goes through _finalize_process and
     _kill_process_group, so the guards on signalling live in
     TestKillProcessGroup and TestFinalizeProcess. What is pinned here is
-    the bookkeeping those guards depend on: order, and doing nothing
-    twice.
+    the bookkeeping those guards depend on: registration order,
+    registration happening before anything that can fail, and doing
+    nothing twice.
     """
+
+    def _register(self, processes: DownloadProcesses, name: str) -> MagicMock:
+        """Register a mock process with the drainer stubbed out.
+
+        register() starts a real stderr drainer, which would read from a
+        MagicMock's stderr and raise inside the thread.
+        """
+        process = MagicMock()
+        with patch("app.services.youtube._start_stderr_drainer", return_value=None):
+            processes.register(name, process, deque())
+        return process
 
     def test_finalizes_in_reverse_registration_order(self) -> None:
         # A pipeline comes down from its consumer end, the order
         # _stream_mp3 used when it finalized ffmpeg before yt-dlp.
         finalized: list[str] = []
         processes = DownloadProcesses()
-        processes.register("yt-dlp", MagicMock(), None)
-        processes.register("ffmpeg", MagicMock(), None)
+        self._register(processes, "yt-dlp")
+        self._register(processes, "ffmpeg")
 
         with patch(
             "app.services.youtube._finalize_process",
@@ -759,7 +772,7 @@ class TestDownloadProcesses:
         # one must not reach a process the first already reaped, whose
         # pid may by then belong to someone else.
         processes = DownloadProcesses()
-        processes.register("yt-dlp", MagicMock(), None)
+        self._register(processes, "yt-dlp")
 
         with patch("app.services.youtube._finalize_process") as finalize:
             processes.close()
@@ -776,3 +789,34 @@ class TestDownloadProcesses:
             processes.close()
 
         finalize.assert_not_called()
+
+    def test_process_is_owned_even_if_its_drainer_cannot_start(self) -> None:
+        # threading.Thread.start() raises RuntimeError when no thread
+        # can be created. Recording the process only afterwards left it
+        # with no owner, so the finally that calls close() found nothing
+        # and the process ran on -- the very leak this class prevents.
+        processes = DownloadProcesses()
+        process = MagicMock()
+
+        with (
+            patch(
+                "app.services.youtube._start_stderr_drainer",
+                side_effect=RuntimeError("can't start new thread"),
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            processes.register("yt-dlp", process, deque())
+
+        with patch("app.services.youtube._finalize_process") as finalize:
+            processes.close()
+
+        finalize.assert_called_once_with("yt-dlp", process, None)
+
+    def test_register_returns_the_drainer_for_the_caller_to_join(self) -> None:
+        # The stream body joins it before reporting a non-zero exit, so
+        # the stderr tail is complete in the error it raises.
+        processes = DownloadProcesses()
+        drainer = MagicMock()
+
+        with patch("app.services.youtube._start_stderr_drainer", return_value=drainer):
+            assert processes.register("yt-dlp", MagicMock(), deque()) is drainer

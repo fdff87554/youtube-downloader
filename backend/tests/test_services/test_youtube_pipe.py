@@ -358,3 +358,39 @@ class TestCloseWhileTheGeneratorIsSuspended:
             stream.close()
 
         killpg.assert_not_called()
+
+
+class TestDrainerThatCannotStart:
+    """The stderr drainer is started after the process it drains.
+
+    threading.Thread.start() raises RuntimeError when the interpreter
+    cannot create a thread, so between Popen and a running drainer there
+    is a window where the subprocess exists but nothing owns it. A
+    version of this that recorded the process only after the drainer had
+    started leaked it: the generator's finally called close(), which
+    found nothing registered, and the subprocess ran on.
+    """
+
+    def test_process_is_killed_when_the_drainer_cannot_start(self) -> None:
+        cmd = [sys.executable, "-c", "import time; time.sleep(60)"]
+        started: list[int] = []
+
+        def explode(name: str, process: subprocess.Popen[bytes], tail: object) -> None:
+            started.append(process.pid)
+            raise RuntimeError("can't start new thread")
+
+        stream = _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
+
+        with (
+            patch("app.services.youtube._start_stderr_drainer", explode),
+            pytest.raises(RuntimeError),
+        ):
+            next(stream)
+
+        assert started, "the drainer was never reached"
+        pid = started[0]
+        try:
+            assert _wait_until_dead(pid), f"subprocess {pid} was left running"
+        finally:
+            if _is_alive(pid):
+                os.kill(pid, signal.SIGKILL)
