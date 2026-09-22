@@ -7,6 +7,16 @@ from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
+# Both /api/info and /api/download answer UnsupportedURLError with this,
+# so the wording lives in one place.
+FORMAT_UNAVAILABLE_MESSAGE = (
+    "This video is not available in the quality you asked for. Try a different quality."
+)
+UNSUPPORTED_URL_MESSAGE = (
+    "This YouTube URL is not a video or playlist that can be downloaded. "
+    "Check the link and try again."
+)
+
 
 def error_response(
     status_code: int,

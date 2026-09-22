@@ -9,10 +9,16 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.limiter import limiter
-from app.routers.shared import error_response
+from app.routers.shared import (
+    FORMAT_UNAVAILABLE_MESSAGE,
+    UNSUPPORTED_URL_MESSAGE,
+    error_response,
+)
 from app.schemas.video import ErrorEnvelope
 from app.services.youtube import (
+    FormatUnavailableError,
     InvalidURLError,
+    UnsupportedURLError,
     VideoNotFoundError,
     YouTubeError,
     build_download_filename,
@@ -104,6 +110,20 @@ def download_video(
         )
     except InvalidURLError as e:
         return error_response(400, "invalid_url", str(e))
+    except FormatUnavailableError as e:
+        return error_response(
+            400,
+            "format_unavailable",
+            FORMAT_UNAVAILABLE_MESSAGE,
+            detail=str(e),
+        )
+    except UnsupportedURLError as e:
+        return error_response(
+            400,
+            "unsupported_url",
+            UNSUPPORTED_URL_MESSAGE,
+            detail=str(e),
+        )
     except VideoNotFoundError as e:
         return error_response(
             404,

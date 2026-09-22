@@ -20,6 +20,7 @@ import time
 import pytest
 
 from app.services.youtube import (
+    UnsupportedURLError,
     VideoNotFoundError,
     YouTubeError,
     _finalize_process,
@@ -117,6 +118,20 @@ class TestRunPipedProcess:
         ]
 
         with pytest.raises(VideoNotFoundError, match="Video unavailable"):
+            list(_run_piped_process(cmd, name="fake"))
+
+    def test_reports_unsupported_url_as_such(self) -> None:
+        # What the CLI prints when the extractor allow-list refuses a
+        # YouTube path that is not media.
+        cmd = [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "sys.stderr.write('ERROR: No suitable extractor found for URL x\\n')\n"
+            "sys.exit(1)\n",
+        ]
+
+        with pytest.raises(UnsupportedURLError, match="No suitable extractor"):
             list(_run_piped_process(cmd, name="fake"))
 
     def test_clean_exit_with_output_does_not_raise(self) -> None:

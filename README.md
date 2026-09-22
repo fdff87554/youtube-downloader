@@ -198,9 +198,14 @@ Errors use a unified envelope:
 }
 ```
 
-One exception: a malformed or missing query parameter is answered by
-FastAPI's own request validation with `422` and a `{"detail": [...]}`
-body. Clients should handle both shapes.
+Codes you can expect: `invalid_url`, `unsupported_url`,
+`format_unavailable` and `playlist_too_large` (400), `not_found`
+(404), `rate_limited` (429), `extraction_error` and
+`download_error` (500).
+
+One exception to the envelope: a malformed or missing query parameter
+is answered by FastAPI's own request validation with `422` and a
+`{"detail": [...]}` body. Clients should handle both shapes.
 
 ## What gets logged
 

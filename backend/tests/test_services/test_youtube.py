@@ -387,6 +387,125 @@ class TestConfigFilesIgnored:
             assert cmd[1] == "--ignore-config"
 
 
+class TestUnsupportedUrlClassification:
+    """A YouTube URL with no extractor is bad input, not a server fault."""
+
+    @patch("app.services.youtube.yt_dlp.YoutubeDL")
+    def test_no_suitable_extractor_raises_unsupported(
+        self, mock_ydl_cls: MagicMock
+    ) -> None:
+        import yt_dlp
+
+        from app.services.youtube import UnsupportedURLError
+
+        mock_ydl = MagicMock()
+        mock_ydl.extract_info.side_effect = yt_dlp.utils.DownloadError(
+            "ERROR: No suitable extractor found for URL "
+            "https://www.youtube.com/about/xyz"
+        )
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl_cls.return_value = mock_ydl
+
+        with pytest.raises(UnsupportedURLError):
+            extract_video_info("https://www.youtube.com/about/xyz")
+
+    @patch("app.services.youtube.yt_dlp.YoutubeDL")
+    def test_unavailable_video_is_still_not_found(
+        self, mock_ydl_cls: MagicMock
+    ) -> None:
+        # The more specific reason must not swallow this one.
+        import yt_dlp
+
+        mock_ydl = MagicMock()
+        mock_ydl.extract_info.side_effect = yt_dlp.utils.DownloadError(
+            "ERROR: Video unavailable"
+        )
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl_cls.return_value = mock_ydl
+
+        with pytest.raises(VideoNotFoundError):
+            extract_video_info("https://www.youtube.com/watch?v=private1")
+
+
+class TestErrorMessageClassification:
+    """Each upstream reason has to reach the status that matches it.
+
+    The marker list is matched as substrings, so a phrase that is too
+    loose silently reclassifies unrelated failures. A bare
+    "not available" used to catch yt-dlp's format error and its
+    impersonation-dependency error and report both as a missing video.
+    All strings below are taken from yt-dlp's own sources.
+    """
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "ERROR: [youtube] abc: Private video. Sign in if you have access",
+            "ERROR: [youtube] abc: Video unavailable",
+            "ERROR: [youtube] abc: This video is not available.",
+            # Observed from the running service, not the yt-dlp source:
+            # a request for a missing video returns this wording, which
+            # an earlier narrowing of the markers stopped matching.
+            "ERROR: [youtube] AAAAAAAAAAA: This video is unavailable",
+            "ERROR: [youtube] abc: This video has been removed for violating YouTube",
+            "ERROR: This playlist is likely not available in your region.",
+        ],
+    )
+    def test_a_missing_video_is_not_found(self, message: str) -> None:
+        from app.services.youtube import _is_unavailable_message
+
+        assert _is_unavailable_message(message)
+
+    def test_a_missing_format_is_not_a_missing_video(self) -> None:
+        # The video is there; the quality the caller asked for is not.
+        from app.services.youtube import (
+            _is_format_unavailable_message,
+            _is_unavailable_message,
+        )
+
+        message = (
+            "ERROR: [youtube] abc: Requested format is not available. "
+            "Use --list-formats for a list of available formats"
+        )
+
+        assert _is_format_unavailable_message(message)
+        assert not _is_unavailable_message(message)
+
+    def test_a_missing_dependency_is_neither(self) -> None:
+        # Impersonation needs curl_cffi on our side. Reporting this as
+        # a missing video pointed the caller at their own URL.
+        from app.services.youtube import (
+            _is_format_unavailable_message,
+            _is_unavailable_message,
+            _is_unsupported_url_message,
+        )
+
+        message = "ERROR: Impersonate target is not available"
+
+        assert not _is_unavailable_message(message)
+        assert not _is_format_unavailable_message(message)
+        assert not _is_unsupported_url_message(message)
+
+    @patch("app.services.youtube.yt_dlp.YoutubeDL")
+    def test_format_error_raises_its_own_type(self, mock_ydl_cls: MagicMock) -> None:
+        import yt_dlp
+
+        from app.services.youtube import FormatUnavailableError
+
+        mock_ydl = MagicMock()
+        mock_ydl.extract_info.side_effect = yt_dlp.utils.DownloadError(
+            "ERROR: Requested format is not available"
+        )
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl_cls.return_value = mock_ydl
+
+        with pytest.raises(FormatUnavailableError):
+            extract_video_info("https://www.youtube.com/watch?v=abc")
+
+
 class TestExtractorsRestricted:
     """Only YouTube's own extractors may ever run.
 
