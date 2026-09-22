@@ -1,5 +1,6 @@
 """Tests for the download streaming API endpoint."""
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -204,3 +205,37 @@ class TestDownloadVideo:
             assert response.headers["content-type"] == "video/mp4"
             for _ in response.iter_bytes():
                 pass
+
+
+class TestEventLoopIsNotBlocked:
+    """Waiting for yt-dlp's first bytes must not run on the event loop."""
+
+    @patch("app.routers.download.stream_download")
+    def test_first_chunk_is_read_off_the_event_loop(
+        self,
+        mock_stream: MagicMock,
+        client,
+    ) -> None:
+        # asyncio.get_running_loop() only succeeds on the thread running
+        # the loop. The first next() on the stream can wait seconds for
+        # yt-dlp to start producing, so doing it there would stall every
+        # other request -- including in-flight downloads.
+        observed: dict[str, bool] = {}
+
+        def recording_generator():
+            try:
+                asyncio.get_running_loop()
+                observed["on_event_loop"] = True
+            except RuntimeError:
+                observed["on_event_loop"] = False
+            yield b"data"
+
+        mock_stream.return_value = recording_generator()
+
+        response = client.get(
+            "/api/download",
+            params={"url": "https://www.youtube.com/watch?v=test"},
+        )
+
+        assert response.status_code == 200
+        assert observed["on_event_loop"] is False
