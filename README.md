@@ -200,8 +200,13 @@ The container writes to stdout/stderr only; nothing is persisted inside
 the image.
 
 - **Access log**: client IP, timestamp, method, path, status, response
-  size and duration. Query strings are deliberately excluded, so the
-  video URL and title a visitor requested are never logged.
+  size and duration. Query strings are excluded, so the video URL and
+  title a visitor requested do not appear in this log.
+- **nginx error log**: nginx writes its own diagnostics (rate-limit
+  rejections, upstream failures) with the **full request line**, query
+  string included. So a rate-limited request does record which video
+  was asked for. Only the access log format is under this project's
+  control; nginx does not offer a format for these entries.
 - **Application log**: warnings and errors, including `yt-dlp` stderr
   when a download fails. A failing URL can appear here.
 
