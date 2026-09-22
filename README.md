@@ -200,12 +200,17 @@ Errors use a unified envelope:
 
 ## What gets logged
 
-The container writes to stdout/stderr only; nothing is persisted inside
-the image.
+The container writes to stdout/stderr only; no log file is written
+inside the image.
 
 - **Access log**: client IP, timestamp, method, path, status, response
-  size and duration. Query strings are deliberately excluded, so the
-  video URL and title a visitor requested are never logged.
+  size and duration. Query strings are excluded, so the video URL and
+  title a visitor requested do not appear in this log.
+- **nginx error log**: nginx writes its own diagnostics (rate-limit
+  rejections, upstream failures) with the **full request line**, query
+  string included. So a rate-limited request does record which video
+  was asked for. Only the access log format is under this project's
+  control; nginx does not offer a format for these entries.
 - **Application log**: warnings and errors, including `yt-dlp` stderr
   when a download fails. A failing URL can appear here.
 
@@ -231,7 +236,14 @@ this project does not configure.
   `/tmp`. If you write your own compose file or run `docker run`
   directly, carry both over: `--read-only --tmpfs /tmp`. Without the
   tmpfs the container cannot start; without `--read-only` it still
-  works, but the no-disk-I/O guarantee is then only a convention.
+  works, but nothing then stops a write to the image layer.
+- What that guarantees precisely: **nothing is written to the
+  container's writable layer**. It is not a guarantee that no byte
+  reaches a disk — Docker's own
+  [tmpfs documentation](https://docs.docker.com/engine/storage/tmpfs/)
+  notes that "the temporary data may be written to a swap file, and
+  thereby persisted to the filesystem". If that matters for your
+  threat model, run the host without swap, or with encrypted swap.
 
 ## Troubleshooting
 
