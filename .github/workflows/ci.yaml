@@ -3,8 +3,10 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # No branches filter: that filter matches a pull request's *base*, so
+  # restricting it to main left every pull request in a stacked series
+  # with no checks at all -- only the one at the bottom targets main.
   pull_request:
-    branches: [main]
 # Actions are pinned to commit SHAs, not tags: a tag can be moved, and
 # docker-publish below holds a token that can write packages.
 permissions:

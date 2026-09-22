@@ -103,3 +103,25 @@ class TestPlaylistInfoEndpoint:
         body = response.json()
         assert body["error"]["code"] == "playlist_too_large"
         assert str(MAX_PLAYLIST_SIZE) in body["error"]["message"]
+
+    @patch("app.routers.info.extract_playlist_info")
+    def test_mixed_case_playlist_url_is_routed_to_the_playlist_extractor(
+        self, mock_extract: MagicMock, client
+    ) -> None:
+        # Normalisation lowercases the host but leaves the path, so the
+        # /playlist check has to be case-insensitive on its own.
+        mock_extract.return_value = PlaylistInfo(
+            playlist_id="PL1",
+            title="T",
+            uploader="U",
+            video_count=0,
+            entries=[],
+        )
+
+        response = client.get(
+            "/api/info",
+            params={"url": "https://WWW.YouTube.com/PlayList?list=PL1"},
+        )
+
+        assert response.status_code == 200
+        mock_extract.assert_called_once()
