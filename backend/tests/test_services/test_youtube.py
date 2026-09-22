@@ -148,7 +148,7 @@ class TestExtractVideoInfo:
 class TestExtractPlaylistInfo:
     @patch("app.services.youtube.yt_dlp.YoutubeDL")
     def test_rejects_playlist_above_size_limit(self, mock_ydl_cls: MagicMock) -> None:
-        from app.services.youtube import MAX_PLAYLIST_SIZE, YouTubeError
+        from app.services.youtube import MAX_PLAYLIST_SIZE, PlaylistTooLargeError
 
         mock_info = {
             "id": "PLhuge",
@@ -165,8 +165,27 @@ class TestExtractPlaylistInfo:
         mock_ydl.__exit__ = MagicMock(return_value=False)
         mock_ydl_cls.return_value = mock_ydl
 
-        with pytest.raises(YouTubeError, match=r"exceeds the .* limit"):
+        with pytest.raises(PlaylistTooLargeError, match=str(MAX_PLAYLIST_SIZE)):
             extract_playlist_info("https://www.youtube.com/playlist?list=PLhuge")
+
+    @patch("app.services.youtube.yt_dlp.YoutubeDL")
+    def test_asks_ytdlp_to_stop_just_past_the_limit(
+        self, mock_ydl_cls: MagicMock
+    ) -> None:
+        # Truncating at the source is what keeps an oversized playlist
+        # from costing a full extraction before being rejected.
+        from app.services.youtube import MAX_PLAYLIST_SIZE
+
+        mock_ydl = MagicMock()
+        mock_ydl.extract_info.return_value = {"id": "PL", "entries": []}
+        mock_ydl.__enter__ = MagicMock(return_value=mock_ydl)
+        mock_ydl.__exit__ = MagicMock(return_value=False)
+        mock_ydl_cls.return_value = mock_ydl
+
+        extract_playlist_info("https://www.youtube.com/playlist?list=PL")
+
+        opts = mock_ydl_cls.call_args[0][0]
+        assert opts["playlistend"] == MAX_PLAYLIST_SIZE + 1
 
     @patch("app.services.youtube.yt_dlp.YoutubeDL")
     def test_returns_playlist_with_entries(self, mock_ydl_cls: MagicMock) -> None:

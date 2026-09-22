@@ -80,3 +80,26 @@ class TestPlaylistInfoEndpoint:
 
             assert response.status_code == 200
             mock_video.assert_called_once()
+
+    @patch("app.routers.info.extract_playlist_info")
+    def test_oversized_playlist_returns_400_with_the_limit(
+        self, mock_extract: MagicMock, client
+    ) -> None:
+        # An oversized playlist is bad input, not a server fault: it
+        # used to come back as a generic 500 "Could not process this
+        # URL", which gave the user nothing to act on.
+        from app.services.youtube import MAX_PLAYLIST_SIZE, PlaylistTooLargeError
+
+        mock_extract.side_effect = PlaylistTooLargeError(
+            f"This playlist has more than {MAX_PLAYLIST_SIZE} videos."
+        )
+
+        response = client.get(
+            "/api/info",
+            params={"url": "https://www.youtube.com/playlist?list=PLhuge"},
+        )
+
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"]["code"] == "playlist_too_large"
+        assert str(MAX_PLAYLIST_SIZE) in body["error"]["message"]
