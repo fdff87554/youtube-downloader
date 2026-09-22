@@ -12,6 +12,7 @@ from app.services.youtube import (
     _build_audio_command,
     _build_video_command,
     _finalize_process,
+    _kill_process_group,
     _resolve_video_format,
     build_download_filename,
     extract_playlist_info,
@@ -464,18 +465,118 @@ class TestResolveVideoFormat:
         assert _resolve_video_format("garbage") == _resolve_video_format("best")
 
 
+class TestKillProcessGroup:
+    """Guards on the one call that can take out unrelated processes.
+
+    os.killpg(pgid) is kill(-pgid): killpg(0) hits the caller's own
+    process group and killpg(1) is kill(-1), which signals every
+    process the user owns. A teardown that dropped the os.getpgid()
+    check and passed a reaped pid straight to killpg once wiped out
+    every process of this uid on a developer machine.
+
+    These tests never spawn or signal anything: os.killpg is patched.
+    """
+
+    def _process(self, pid: int = 4242) -> MagicMock:
+        process = MagicMock()
+        process.pid = pid
+        return process
+
+    def test_does_not_signal_a_reaped_process(self) -> None:
+        # getpgid raising ProcessLookupError is how a released pid is
+        # detected; the number may belong to someone else by now.
+        with (
+            patch("app.services.youtube.os.getpgid", side_effect=ProcessLookupError),
+            patch("app.services.youtube.os.killpg") as mock_killpg,
+        ):
+            _kill_process_group(self._process())
+
+        mock_killpg.assert_not_called()
+
+    def test_does_not_signal_a_group_it_may_not_signal(self) -> None:
+        with (
+            patch("app.services.youtube.os.getpgid", side_effect=PermissionError),
+            patch("app.services.youtube.os.killpg") as mock_killpg,
+        ):
+            _kill_process_group(self._process())
+
+        mock_killpg.assert_not_called()
+
+    @pytest.mark.parametrize("pgid", [0, 1, -1])
+    def test_refuses_process_groups_that_are_never_ours(self, pgid: int) -> None:
+        # start_new_session makes the group id the child's pid, so these
+        # values can only mean the lookup returned something unrelated.
+        with (
+            patch("app.services.youtube.os.getpgid", return_value=pgid),
+            patch("app.services.youtube.os.killpg") as mock_killpg,
+            patch("app.services.youtube.logger") as mock_logger,
+        ):
+            _kill_process_group(self._process())
+
+        mock_killpg.assert_not_called()
+        mock_logger.error.assert_called_once()
+
+    def test_teardown_skips_the_group_once_the_child_is_reaped(self) -> None:
+        # The streaming paths clean the group up before reaping, so a
+        # second attempt afterwards finds nothing of ours: the pid has
+        # been released and the number may now belong to someone else.
+        process = self._process()
+        process.returncode = 0
+        process.stdout = None
+
+        with (
+            patch("app.services.youtube.os.getpgid") as mock_getpgid,
+            patch("app.services.youtube.os.killpg") as mock_killpg,
+        ):
+            _finalize_process("fake", process, drainer=None)
+
+        mock_getpgid.assert_not_called()
+        mock_killpg.assert_not_called()
+
+    def test_teardown_signals_the_group_when_nobody_has_reaped(self) -> None:
+        # The client-disconnect path: the generator is closed at the
+        # yield, so no one waited on the child and the group is still
+        # ours to take down.
+        process = self._process()
+        process.returncode = None
+        process.stdout = None
+
+        with (
+            patch("app.services.youtube.os.getpgid", return_value=4242),
+            patch("app.services.youtube.os.killpg") as mock_killpg,
+        ):
+            _finalize_process("fake", process, drainer=None)
+
+        mock_killpg.assert_called_once_with(4242, signal.SIGKILL)
+
+    def test_signals_the_group_of_a_live_child(self) -> None:
+        with (
+            patch("app.services.youtube.os.getpgid", return_value=4242),
+            patch("app.services.youtube.os.killpg") as mock_killpg,
+        ):
+            _kill_process_group(self._process(pid=4242))
+
+        mock_killpg.assert_called_once_with(4242, signal.SIGKILL)
+
+
 class TestFinalizeProcess:
     def _make_process(self, returncode: int) -> MagicMock:
         process = MagicMock()
         process.poll.return_value = returncode  # already exited
         process.returncode = returncode
         process.stdout = None
+        # A reaped child: getpgid on its pid raises, so teardown skips
+        # the group signal. Patched per test via _reaped_group().
+        process.pid = 4242
         return process
+
+    def _reaped_group(self):
+        return patch("app.services.youtube.os.getpgid", side_effect=ProcessLookupError)
 
     def test_logs_error_when_process_exits_non_zero(self) -> None:
         process = self._make_process(returncode=1)
 
-        with patch("app.services.youtube.logger") as mock_logger:
+        with self._reaped_group(), patch("app.services.youtube.logger") as mock_logger:
             _finalize_process("yt-dlp", process, drainer=None)
 
         mock_logger.error.assert_called_once_with("%s exited with code %s", "yt-dlp", 1)
@@ -483,7 +584,7 @@ class TestFinalizeProcess:
     def test_does_not_log_error_for_clean_exit(self) -> None:
         process = self._make_process(returncode=0)
 
-        with patch("app.services.youtube.logger") as mock_logger:
+        with self._reaped_group(), patch("app.services.youtube.logger") as mock_logger:
             _finalize_process("ffmpeg", process, drainer=None)
 
         mock_logger.error.assert_not_called()
@@ -492,7 +593,7 @@ class TestFinalizeProcess:
         # We send SIGKILL ourselves during teardown, so it is expected.
         process = self._make_process(returncode=-signal.SIGKILL)
 
-        with patch("app.services.youtube.logger") as mock_logger:
+        with self._reaped_group(), patch("app.services.youtube.logger") as mock_logger:
             _finalize_process("yt-dlp", process, drainer=None)
 
         mock_logger.error.assert_not_called()

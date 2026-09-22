@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import re
 import signal
 import subprocess
@@ -36,6 +37,9 @@ YOUTUBE_URL_PATTERN = re.compile(
 SOCKET_TIMEOUT = 30
 CHUNK_SIZE = 65536
 STDERR_DRAIN_TIMEOUT = 2.0
+# Teardown runs while the event loop is finalizing the response
+# generator, so it must not be able to block indefinitely.
+PROCESS_EXIT_TIMEOUT = 5.0
 MAX_PLAYLIST_SIZE = 200
 # How many stderr lines to keep so a failed subprocess can explain itself
 # in the error surfaced to the caller. yt-dlp puts the reason on the last
@@ -282,6 +286,9 @@ def _stream_mp3(url: str) -> Generator[bytes]:
         "ffmpeg",
         "-i",
         "pipe:0",
+        # bestaudio/best can resolve to a progressive stream that still
+        # carries video, which the mp3 muxer cannot take.
+        "-vn",
         "-f",
         "mp3",
         "-ab",
@@ -306,12 +313,14 @@ def _stream_mp3(url: str) -> Generator[bytes]:
                 ytdlp_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                start_new_session=True,
             )
             ffmpeg_proc = subprocess.Popen(
                 ffmpeg_cmd,
                 stdin=ytdlp_proc.stdout,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                start_new_session=True,
             )
         except FileNotFoundError as e:
             raise YouTubeError(
@@ -333,6 +342,12 @@ def _stream_mp3(url: str) -> Generator[bytes]:
             if not chunk:
                 break
             yield chunk
+
+        # Same ordering as the single-process path: reach each group
+        # while its leader still holds its pid.
+        for proc in (ytdlp_proc, ffmpeg_proc):
+            _await_exit_without_reaping(proc)
+            _kill_process_group(proc)
 
         # yt-dlp is checked first: when it fails, ffmpeg's own non-zero
         # exit is only a consequence of receiving a truncated stream,
@@ -363,6 +378,8 @@ def _run_piped_process(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                # Own session, so teardown can signal the whole group.
+                start_new_session=True,
             )
         except FileNotFoundError as e:
             raise YouTubeError("yt-dlp is not installed or not in PATH.") from e
@@ -381,6 +398,12 @@ def _run_piped_process(
         # exit here means the download failed; without this the
         # generator would end normally and the caller would serve a
         # successful-looking but empty response.
+        #
+        # Clean the group up before reaping: yt-dlp can exit while the
+        # ffmpeg it started for muxing is still alive, and once the pid
+        # is released there is no safe way to reach that grandchild.
+        _await_exit_without_reaping(process)
+        _kill_process_group(process)
         if process.wait() != 0:
             _raise_from_subprocess_failure(
                 name, process.returncode, stderr_tail, drainer
@@ -442,6 +465,24 @@ def _raise_from_subprocess_failure(
     raise YouTubeError(f"{name} failed: {detail}")
 
 
+def _await_exit_without_reaping(process: subprocess.Popen[bytes]) -> None:
+    """Block until the subprocess exits, leaving it unreaped.
+
+    WNOWAIT keeps the child in its zombie state, which keeps its pid
+    allocated. That is what makes the group cleanup that follows safe
+    *and* effective: while the pid is held it cannot have been reused,
+    so os.getpgid still identifies our group, and anything the child
+    spawned is still in it. Reaping first -- as Popen.wait does --
+    releases the pid, and then teardown can neither find the group nor
+    trust the number it was given.
+
+    Signals sent to a zombie are discarded, so the exit status the
+    caller reads afterwards is the one the child actually produced.
+    """
+    with contextlib.suppress(ChildProcessError):
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+
+
 def _finalize_process(
     name: str,
     process: subprocess.Popen[bytes] | None,
@@ -455,18 +496,68 @@ def _finalize_process(
     """
     if process is None:
         return
-    if process.poll() is None:
-        process.kill()
+    # returncode, not poll(): reading the attribute tells us whether
+    # Popen has already reaped the child, while poll() would do the
+    # reaping itself and release the pid we are about to look up.
+    #
+    # Once reaped there is nothing left to signal -- the callers that
+    # reap do the group cleanup first, while the pid is still held --
+    # and the number may already belong to someone else, so signalling
+    # it could reach an unrelated process group. Still None means
+    # nobody has waited on this child, which is the disconnect path,
+    # and there the group does need taking down.
+    if process.returncode is None:
+        _kill_process_group(process)
     if process.stdout:
         with contextlib.suppress(Exception):
             process.stdout.close()
-    process.wait()
+    try:
+        process.wait(timeout=PROCESS_EXIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        logger.error("%s did not exit within %ss", name, PROCESS_EXIT_TIMEOUT)
+        return
     if drainer is not None:
         drainer.join(timeout=STDERR_DRAIN_TIMEOUT)
     # Treat SIGKILL as a clean teardown we initiated; everything else is
     # an unexpected failure that operators need to see in the logs.
     if process.returncode not in (0, -signal.SIGKILL):
         logger.error("%s exited with code %s", name, process.returncode)
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    """SIGKILL the subprocess along with anything it spawned.
+
+    yt-dlp starts ffmpeg itself to mux separate video and audio
+    streams, so killing only the direct child can leave that grandchild
+    holding two HTTPS connections with no socket timeout of its own.
+    Every subprocess here is started with ``start_new_session=True``, so
+    its process group id equals its pid.
+
+    Two things here are load-bearing. Do not remove either.
+
+    ``os.getpgid`` is not a lookup for convenience: it is the proof
+    that the pid is still ours to signal. It succeeds while the child
+    runs and while it is a zombie -- in both states the pid is still
+    held and cannot have been reused -- and raises ProcessLookupError
+    once the child has been reaped. Passing ``process.pid`` straight to
+    killpg instead skips that check and can signal whatever process
+    group has since inherited the number.
+
+    The ``pgid <= 1`` refusal is the backstop, because killpg is
+    kill(-pgid): killpg(0) signals *our own* process group, and
+    killpg(1) is kill(-1), which signals every process this user owns.
+    A group we created can never be 0 or 1.
+    """
+    try:
+        pgid = os.getpgid(process.pid)
+    except ProcessLookupError, PermissionError:
+        # Already reaped, or not ours: there is nothing safe to signal.
+        return
+    if pgid <= 1:
+        logger.error("refusing to signal process group %s", pgid)
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
 
 
 def build_download_filename(

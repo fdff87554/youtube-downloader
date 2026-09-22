@@ -10,15 +10,44 @@ binary-missing failure modes.
 
 from __future__ import annotations
 
+import os
+import pathlib
+import signal
+import subprocess
 import sys
+import time
 
 import pytest
 
 from app.services.youtube import (
     VideoNotFoundError,
     YouTubeError,
+    _finalize_process,
     _run_piped_process,
 )
+
+# Linux-only: the project ships as a Linux container and CI runs on
+# ubuntu-latest.
+PROC_STATUS = "/proc/{pid}/stat"
+
+
+def _is_alive(pid: int) -> bool:
+    """Whether pid exists and is not a zombie awaiting reaping."""
+    try:
+        with open(PROC_STATUS.format(pid=pid)) as stat:
+            state = stat.read().rsplit(") ", 1)[1].split()[0]
+    except FileNotFoundError:
+        return False
+    return state != "Z"
+
+
+def _wait_until_dead(pid: int, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _is_alive(pid):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 class TestRunPipedProcess:
@@ -94,3 +123,112 @@ class TestRunPipedProcess:
         cmd = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok')"]
 
         assert b"".join(_run_piped_process(cmd, name="fake")) == b"ok"
+
+
+class TestFinalizeProcessKillsGrandchildren:
+    """yt-dlp spawns ffmpeg itself when it has to mux two streams.
+
+    Signalling only the direct child left that grandchild holding two
+    HTTPS connections, with no socket timeout of its own, for as long
+    as the container lived.
+    """
+
+    def test_grandchild_does_not_survive_teardown(self) -> None:
+        spawner = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c',"
+            " 'import time; time.sleep(60)'])\n"
+            "print(child.pid, flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", spawner],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        assert process.stdout is not None
+        grandchild_pid = int(process.stdout.readline())
+        assert _is_alive(grandchild_pid)
+
+        _finalize_process("fake", process, drainer=None)
+
+        assert _wait_until_dead(grandchild_pid), (
+            f"grandchild {grandchild_pid} outlived teardown"
+        )
+        assert not _is_alive(process.pid)
+
+    def test_teardown_does_not_signal_the_servers_own_group(self) -> None:
+        # start_new_session puts each child in its own group, so the
+        # killpg target can never be the process running the tests.
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        assert os.getpgid(process.pid) != os.getpgid(0)
+
+        _finalize_process("fake", process, drainer=None)
+        assert not _is_alive(process.pid)
+
+
+class TestGrandchildOutlivingTheParent:
+    """The case that matters in production: yt-dlp exits, ffmpeg does not.
+
+    yt-dlp starts ffmpeg itself to mux separate streams, so the direct
+    child can finish while the grandchild is still running. The stream
+    body reaps the child to read its exit status, and a reaped pid can
+    be neither found (os.getpgid raises) nor trusted (the number may
+    have been reused), so the cleanup has to happen before that.
+    """
+
+    def _spawner(self, marker: pathlib.Path, exit_code: int) -> list[str]:
+        # The grandchild gets its own stdout: inheriting the pipe would
+        # hold it open after the parent exits and the read loop would
+        # never see EOF.
+        return [
+            sys.executable,
+            "-c",
+            "import subprocess, sys, pathlib\n"
+            "child = subprocess.Popen(\n"
+            "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+            "    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            f"pathlib.Path({str(marker)!r}).write_text(str(child.pid))\n"
+            "sys.stdout.buffer.write(b'data')\n"
+            "sys.stdout.flush()\n"
+            f"sys.exit({exit_code})\n",
+        ]
+
+    def _grandchild_pid(self, marker: pathlib.Path) -> int:
+        return int(marker.read_text())
+
+    def test_grandchild_is_killed_when_the_parent_exits_cleanly(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        marker = tmp_path / "grandchild.pid"
+
+        assert (
+            b"".join(_run_piped_process(self._spawner(marker, 0), name="fake"))
+            == b"data"
+        )
+
+        grandchild = self._grandchild_pid(marker)
+        if not _wait_until_dead(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
+            pytest.fail(f"grandchild {grandchild} outlived a clean exit")
+
+    def test_exit_status_survives_the_group_kill(self, tmp_path: pathlib.Path) -> None:
+        # The cleanup signals the group while the child is a zombie.
+        # Signals to a zombie are discarded, so the failure must still
+        # be reported as the child's own non-zero exit, not as SIGKILL.
+        marker = tmp_path / "grandchild.pid"
+
+        with pytest.raises(YouTubeError, match="exited with code 1"):
+            list(_run_piped_process(self._spawner(marker, 1), name="fake"))
+
+        grandchild = self._grandchild_pid(marker)
+        if not _wait_until_dead(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
+            pytest.fail(f"grandchild {grandchild} outlived a failed exit")
