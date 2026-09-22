@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from app.limiter import limiter
 from app.routers.shared import (
@@ -16,6 +17,7 @@ from app.routers.shared import (
 )
 from app.schemas.video import ErrorEnvelope
 from app.services.youtube import (
+    DownloadProcesses,
     FormatUnavailableError,
     InvalidURLError,
     UnsupportedURLError,
@@ -94,7 +96,8 @@ def download_video(
         media_type = MEDIA_TYPES[fmt]
         encoded_filename = quote(filename)
 
-        stream = stream_download(url, fmt.value, quality.value)
+        processes = DownloadProcesses()
+        stream = stream_download(url, fmt.value, quality.value, processes=processes)
         first_chunk = _start_stream(stream)
 
         return StreamingResponse(
@@ -107,6 +110,13 @@ def download_video(
                     f"filename*=UTF-8''{encoded_filename}"
                 ),
             },
+            # The only cleanup hook that runs when a client disconnects
+            # mid-download. Starlette abandons the response iterator
+            # rather than closing it, so the generator's own finally
+            # cannot be relied on to kill yt-dlp and ffmpeg; this can.
+            # It also runs after a normal response, where closing an
+            # already-finalized pipeline is a no-op.
+            background=BackgroundTask(processes.close),
         )
     except InvalidURLError as e:
         return error_response(400, "invalid_url", str(e))
