@@ -466,8 +466,12 @@ def _finalize_process(
     """
     if process is None:
         return
-    if process.poll() is None:
-        _kill_process_group(process)
+    # Before poll() or wait(), both of which reap: once the pid is
+    # released, _kill_process_group can no longer prove the group is
+    # ours and will refuse to signal it. Running first also covers the
+    # case where the child has exited but still holds its pid, which is
+    # where a surviving grandchild would be.
+    _kill_process_group(process)
     if process.stdout:
         with contextlib.suppress(Exception):
             process.stdout.close()
@@ -491,16 +495,33 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
     streams, so killing only the direct child can leave that grandchild
     holding two HTTPS connections with no socket timeout of its own.
     Every subprocess here is started with ``start_new_session=True``, so
-    its process group id equals its pid and this can never signal the
-    server's own group.
+    its process group id equals its pid.
+
+    Two things here are load-bearing. Do not remove either.
+
+    ``os.getpgid`` is not a lookup for convenience: it is the proof
+    that the pid is still ours to signal. It succeeds while the child
+    runs and while it is a zombie -- in both states the pid is still
+    held and cannot have been reused -- and raises ProcessLookupError
+    once the child has been reaped. Passing ``process.pid`` straight to
+    killpg instead skips that check and can signal whatever process
+    group has since inherited the number.
+
+    The ``pgid <= 1`` refusal is the backstop, because killpg is
+    kill(-pgid): killpg(0) signals *our own* process group, and
+    killpg(1) is kill(-1), which signals every process this user owns.
+    A group we created can never be 0 or 1.
     """
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        pgid = os.getpgid(process.pid)
     except ProcessLookupError, PermissionError:
-        # Group already gone, or not ours to signal: settle for the
-        # direct child.
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
+        # Already reaped, or not ours: there is nothing safe to signal.
+        return
+    if pgid <= 1:
+        logger.error("refusing to signal process group %s", pgid)
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
 
 
 def build_download_filename(
