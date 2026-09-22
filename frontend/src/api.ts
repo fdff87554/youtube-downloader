@@ -59,7 +59,13 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 export function isPlaylistInfo(info: unknown): info is PlaylistInfo {
-  return isObject(info) && "playlist_id" in info;
+  // entries is checked, not just playlist_id: createPlaylistView
+  // iterates it, so a body carrying the id without the array made the
+  // render throw "info.entries is not iterable" rather than reaching
+  // the unrecognised-response branch. The other fields are left to the
+  // backend's response model; missing scalars degrade to empty text
+  // instead of failing.
+  return isObject(info) && "playlist_id" in info && Array.isArray(info.entries);
 }
 
 export function isVideoInfo(info: unknown): info is VideoInfo {
