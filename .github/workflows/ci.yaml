@@ -49,6 +49,11 @@ jobs:
         run: python -m pre_commit run --all-files
       - name: Run backend tests
         run: cd backend && python -m pytest tests/ -v
+      # Signal handling in the entrypoint, with uvicorn and nginx stubbed
+      # out. Needs no image, so it belongs here rather than in
+      # docker-build.
+      - name: Run entrypoint signal tests
+        run: bash docker/entrypoint.test.sh
       - name: Run frontend tests
         run: cd frontend && npm test
       - name: Build frontend
