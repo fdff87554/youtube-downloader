@@ -54,6 +54,22 @@ describe("type guards on unexpected bodies", () => {
     expect(isVideoInfo({ detail: [] })).toBe(false);
     expect(isPlaylistInfo({ detail: [] })).toBe(false);
   });
+
+  it("rejects a playlist body whose entries array is missing", () => {
+    // createPlaylistView iterates entries, so letting this through
+    // threw "info.entries is not iterable" out of the render instead
+    // of showing the unrecognised-response message.
+    expect(isPlaylistInfo({ playlist_id: "p1" })).toBe(false);
+  });
+
+  it("rejects a playlist body whose entries is not an array", () => {
+    expect(isPlaylistInfo({ playlist_id: "p1", entries: null })).toBe(false);
+    expect(isPlaylistInfo({ playlist_id: "p1", entries: "nope" })).toBe(false);
+  });
+
+  it("accepts a playlist body with an empty entries array", () => {
+    expect(isPlaylistInfo({ playlist_id: "p1", entries: [] })).toBe(true);
+  });
 });
 
 describe("formatDuration", () => {
