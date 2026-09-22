@@ -196,8 +196,8 @@ Errors use a unified envelope:
 
 ## What gets logged
 
-The container writes to stdout/stderr only; nothing is persisted inside
-the image.
+The container writes to stdout/stderr only; no log file is written
+inside the image.
 
 - **Access log**: client IP, timestamp, method, path, status, response
   size and duration. Query strings are excluded, so the video URL and
@@ -229,7 +229,14 @@ this project does not configure.
   `/tmp`. If you write your own compose file or run `docker run`
   directly, carry both over: `--read-only --tmpfs /tmp`. Without the
   tmpfs the container cannot start; without `--read-only` it still
-  works, but the no-disk-I/O guarantee is then only a convention.
+  works, but nothing then stops a write to the image layer.
+- What that guarantees precisely: **nothing is written to the
+  container's writable layer**. It is not a guarantee that no byte
+  reaches a disk — Docker's own
+  [tmpfs documentation](https://docs.docker.com/engine/storage/tmpfs/)
+  notes that "the temporary data may be written to a swap file, and
+  thereby persisted to the filesystem". If that matters for your
+  threat model, run the host without swap, or with encrypted swap.
 
 ## Troubleshooting
 
