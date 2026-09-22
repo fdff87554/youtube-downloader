@@ -49,12 +49,21 @@ export interface ApiError {
 
 export type InfoResponse = VideoInfo | PlaylistInfo;
 
-export function isPlaylistInfo(info: InfoResponse): info is PlaylistInfo {
-  return "playlist_id" in info;
+// These take `unknown` rather than InfoResponse on purpose: they run
+// against whatever the network actually returned. `in` throws on null
+// and on primitives, so with the narrower type the guard itself was
+// the thing that failed on an unexpected body, and the caller's
+// friendly "unrecognised response" branch was unreachable.
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
-export function isVideoInfo(info: InfoResponse): info is VideoInfo {
-  return "video_id" in info && !("playlist_id" in info);
+export function isPlaylistInfo(info: unknown): info is PlaylistInfo {
+  return isObject(info) && "playlist_id" in info;
+}
+
+export function isVideoInfo(info: unknown): info is VideoInfo {
+  return isObject(info) && "video_id" in info && !("playlist_id" in info);
 }
 
 async function handleResponse<T>(response: Response): Promise<T> {

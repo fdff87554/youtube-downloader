@@ -16,8 +16,8 @@ from app.services.youtube import (
     VideoNotFoundError,
     YouTubeError,
     build_download_filename,
+    normalize_youtube_url,
     stream_download,
-    validate_youtube_url,
 )
 
 router = APIRouter(prefix="/api", tags=["download"])
@@ -56,7 +56,7 @@ MEDIA_TYPES = {
     },
 )
 @limiter.limit("5/minute")
-async def download_video(
+def download_video(
     request: Request,
     url: str = Query(..., description="YouTube video URL"),
     fmt: FormatType = FormatType.MP4,
@@ -66,6 +66,12 @@ async def download_video(
     """Stream a YouTube video or audio download.
 
     Pipes yt-dlp output directly to the HTTP response with zero disk I/O.
+
+    Declared sync on purpose: _start_stream blocks until yt-dlp has
+    produced its first bytes, which can take seconds. FastAPI runs sync
+    endpoints in a worker thread; as an ``async def`` that wait ran on
+    the single event loop and stalled every other request, including
+    in-flight downloads and the health check.
 
     Args:
         url: YouTube video URL.
@@ -77,7 +83,7 @@ async def download_video(
         StreamingResponse with the media content.
     """
     try:
-        validate_youtube_url(url)
+        url = normalize_youtube_url(url)
         filename = build_download_filename(title, fmt.value)
         media_type = MEDIA_TYPES[fmt]
         encoded_filename = quote(filename)

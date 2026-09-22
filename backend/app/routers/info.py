@@ -15,6 +15,7 @@ from app.services.youtube import (
     YouTubeError,
     extract_playlist_info,
     extract_video_info,
+    normalize_youtube_url,
 )
 
 router = APIRouter(prefix="/api", tags=["info"])
@@ -49,6 +50,7 @@ def get_info(
         VideoInfo for single videos, PlaylistInfo for playlists.
     """
     try:
+        url = normalize_youtube_url(url)
         if _is_playlist_url(url):
             return extract_playlist_info(url)
         return extract_video_info(url)
@@ -79,6 +81,10 @@ def _is_playlist_url(url: str) -> bool:
     URLs like watch?v=abc&list=PLxxx are treated as single videos
     since the user's intent is to download that specific video.
     Only /playlist paths are treated as playlist requests.
+
+    The comparison is case-insensitive: normalisation lowercases the
+    scheme and host but leaves the path alone, because video IDs live
+    there and are case-sensitive.
     """
     parsed = urlparse(url)
-    return parsed.path.rstrip("/").endswith("/playlist")
+    return parsed.path.rstrip("/").lower().endswith("/playlist")
