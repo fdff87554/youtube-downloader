@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.services.youtube import YouTubeError
+
 
 class TestDownloadVideo:
     @patch("app.routers.download.stream_download")
@@ -285,3 +287,75 @@ class TestEventLoopIsNotBlocked:
 
         assert response.status_code == 200
         assert observed["on_event_loop"] is False
+
+
+class TestPipelineCleanupIsReachableFromTheResponse:
+    """Issue #105: the generator's finally cannot clean up a disconnect.
+
+    Starlette wraps the sync response iterator in iterate_in_threadpool,
+    which never calls close() on it, so a cancelled response abandons
+    the generator instead of closing it and yt-dlp and ffmpeg keep
+    running. The response's background task is the hook that does run,
+    so the endpoint has to hand the pipeline a handle it can close from
+    there rather than relying on the generator unwinding.
+    """
+
+    @patch("app.routers.download.stream_download")
+    def test_pipeline_handle_is_passed_to_the_service(
+        self,
+        mock_stream: MagicMock,
+        client,
+    ) -> None:
+        mock_stream.return_value = iter([b"data"])
+
+        with patch("app.routers.download.DownloadProcesses") as processes_cls:
+            handle = processes_cls.return_value
+            client.get(
+                "/api/download",
+                params={"url": "https://www.youtube.com/watch?v=test"},
+            )
+
+        assert mock_stream.call_args.kwargs["processes"] is handle
+
+    @patch("app.routers.download.stream_download")
+    def test_pipeline_is_closed_once_the_response_is_done(
+        self,
+        mock_stream: MagicMock,
+        client,
+    ) -> None:
+        mock_stream.return_value = iter([b"data"])
+
+        with patch("app.routers.download.DownloadProcesses") as processes_cls:
+            handle = processes_cls.return_value
+            response = client.get(
+                "/api/download",
+                params={"url": "https://www.youtube.com/watch?v=test"},
+            )
+
+        assert response.status_code == 200
+        handle.close.assert_called_once_with()
+
+    @patch("app.routers.download.stream_download")
+    def test_no_background_task_when_the_download_fails_to_start(
+        self,
+        mock_stream: MagicMock,
+        client,
+    ) -> None:
+        # The failure surfaces before StreamingResponse exists, so the
+        # generator's own finally is what cleaned up; there is no
+        # response left to carry a background task.
+        def failing_generator():
+            raise YouTubeError("yt-dlp failed")
+            yield b""  # pragma: no cover - generator marker
+
+        mock_stream.return_value = failing_generator()
+
+        with patch("app.routers.download.DownloadProcesses") as processes_cls:
+            handle = processes_cls.return_value
+            response = client.get(
+                "/api/download",
+                params={"url": "https://www.youtube.com/watch?v=test"},
+            )
+
+        assert response.status_code == 500
+        handle.close.assert_not_called()

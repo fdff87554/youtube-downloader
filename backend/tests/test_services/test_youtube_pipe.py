@@ -16,10 +16,12 @@ import signal
 import subprocess
 import sys
 import time
+from unittest.mock import patch
 
 import pytest
 
 from app.services.youtube import (
+    DownloadProcesses,
     UnsupportedURLError,
     VideoNotFoundError,
     YouTubeError,
@@ -62,7 +64,9 @@ class TestRunPipedProcess:
             f"import sys; sys.stdout.buffer.write(b'a' * {payload_size})",
         ]
 
-        result = b"".join(_run_piped_process(cmd, name="fake"))
+        result = b"".join(
+            _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
+        )
 
         assert result == b"a" * payload_size
 
@@ -80,13 +84,19 @@ class TestRunPipedProcess:
             "sys.stdout.buffer.write(b'payload')\n",
         ]
 
-        result = b"".join(_run_piped_process(cmd, name="fake"))
+        result = b"".join(
+            _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
+        )
 
         assert result == b"payload"
 
     def test_raises_youtube_error_when_binary_missing(self) -> None:
         with pytest.raises(YouTubeError, match="not installed"):
-            list(_run_piped_process(["/no/such/binary"], name="missing"))
+            list(
+                _run_piped_process(
+                    ["/no/such/binary"], name="missing", processes=DownloadProcesses()
+                )
+            )
 
     def test_raises_when_process_exits_non_zero_after_empty_stdout(self) -> None:
         # The failure mode that made an unavailable video look like a
@@ -94,7 +104,7 @@ class TestRunPipedProcess:
         cmd = [sys.executable, "-c", "import sys; sys.exit(1)"]
 
         with pytest.raises(YouTubeError, match="exited with code 1"):
-            list(_run_piped_process(cmd, name="fake"))
+            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
 
     def test_raises_when_process_exits_non_zero_after_partial_stdout(self) -> None:
         cmd = [
@@ -104,7 +114,7 @@ class TestRunPipedProcess:
         ]
 
         with pytest.raises(YouTubeError):
-            list(_run_piped_process(cmd, name="fake"))
+            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
 
     def test_reports_unavailable_video_as_not_found(self) -> None:
         # yt-dlp writes the reason to stderr and exits non-zero; the
@@ -118,7 +128,7 @@ class TestRunPipedProcess:
         ]
 
         with pytest.raises(VideoNotFoundError, match="Video unavailable"):
-            list(_run_piped_process(cmd, name="fake"))
+            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
 
     def test_reports_unsupported_url_as_such(self) -> None:
         # What the CLI prints when the extractor allow-list refuses a
@@ -132,12 +142,17 @@ class TestRunPipedProcess:
         ]
 
         with pytest.raises(UnsupportedURLError, match="No suitable extractor"):
-            list(_run_piped_process(cmd, name="fake"))
+            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
 
     def test_clean_exit_with_output_does_not_raise(self) -> None:
         cmd = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok')"]
 
-        assert b"".join(_run_piped_process(cmd, name="fake")) == b"ok"
+        assert (
+            b"".join(
+                _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
+            )
+            == b"ok"
+        )
 
 
 class TestFinalizeProcessKillsGrandchildren:
@@ -225,7 +240,11 @@ class TestGrandchildOutlivingTheParent:
         marker = tmp_path / "grandchild.pid"
 
         assert (
-            b"".join(_run_piped_process(self._spawner(marker, 0), name="fake"))
+            b"".join(
+                _run_piped_process(
+                    self._spawner(marker, 0), name="fake", processes=DownloadProcesses()
+                )
+            )
             == b"data"
         )
 
@@ -241,9 +260,101 @@ class TestGrandchildOutlivingTheParent:
         marker = tmp_path / "grandchild.pid"
 
         with pytest.raises(YouTubeError, match="exited with code 1"):
-            list(_run_piped_process(self._spawner(marker, 1), name="fake"))
+            list(
+                _run_piped_process(
+                    self._spawner(marker, 1), name="fake", processes=DownloadProcesses()
+                )
+            )
 
         grandchild = self._grandchild_pid(marker)
         if not _wait_until_dead(grandchild):
             os.kill(grandchild, signal.SIGKILL)
             pytest.fail(f"grandchild {grandchild} outlived a failed exit")
+
+
+class TestCloseWhileTheGeneratorIsSuspended:
+    """Issue #105: a client disconnect abandons the response iterator.
+
+    Starlette hands a sync iterator to iterate_in_threadpool, which
+    never calls close() on it, so cancelling the response leaves the
+    generator suspended at its yield and its finally unreached. Across
+    31 measured disconnects the finally ran 13 times, all of them
+    garbage-collected tens of seconds late, and never at all against a
+    real yt-dlp within 90s -- every disconnect left a yt-dlp and an
+    ffmpeg downloading to nowhere.
+
+    DownloadProcesses.close is what the router attaches to the
+    response's BackgroundTask, which does run on that path. These tests
+    drive it the way the background task does: from outside a generator
+    that is never closed.
+    """
+
+    def _forever_with_grandchild(self, marker: pathlib.Path) -> list[str]:
+        # Streams until killed, so the generator stays suspended at a
+        # yield, and starts a grandchild the way yt-dlp starts ffmpeg.
+        # The grandchild gets its own stdout so it cannot hold the pipe
+        # open and mask a failure to kill it.
+        return [
+            sys.executable,
+            "-c",
+            "import os, subprocess, sys, pathlib, time\n"
+            "child = subprocess.Popen(\n"
+            "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+            "    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            f"pathlib.Path({str(marker)!r}).write_text(\n"
+            "    str(os.getpid()) + ' ' + str(child.pid))\n"
+            "while True:\n"
+            "    sys.stdout.buffer.write(b'x' * 4096)\n"
+            "    sys.stdout.buffer.flush()\n"
+            "    time.sleep(0.01)\n",
+        ]
+
+    def test_close_kills_the_pipeline_the_generator_never_released(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        marker = tmp_path / "pids"
+        processes = DownloadProcesses()
+        stream = _run_piped_process(
+            self._forever_with_grandchild(marker), name="fake", processes=processes
+        )
+
+        assert next(stream)  # the pipeline is live and streaming
+        child, grandchild = (int(pid) for pid in marker.read_text().split())
+        assert _is_alive(child)
+        assert _is_alive(grandchild)
+
+        # The disconnect: the generator is abandoned mid-stream, still
+        # suspended at its yield, and close() is all that runs.
+        processes.close()
+
+        try:
+            assert _wait_until_dead(child), f"yt-dlp stand-in {child} survived"
+            assert _wait_until_dead(grandchild), (
+                f"ffmpeg stand-in {grandchild} survived"
+            )
+        finally:
+            for pid in (child, grandchild):
+                if _is_alive(pid):
+                    os.kill(pid, signal.SIGKILL)
+            stream.close()
+
+    def test_generator_teardown_after_close_is_a_no_op(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # The other half of the race: the background task closes first,
+        # then the abandoned generator is finally collected and its
+        # finally calls close() again. By then the pid has been reaped
+        # and may belong to someone else, so nothing may be signalled.
+        marker = tmp_path / "pids"
+        processes = DownloadProcesses()
+        stream = _run_piped_process(
+            self._forever_with_grandchild(marker), name="fake", processes=processes
+        )
+
+        assert next(stream)
+        processes.close()
+
+        with patch("app.services.youtube.os.killpg") as killpg:
+            stream.close()
+
+        killpg.assert_not_called()

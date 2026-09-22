@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.youtube import (
+    DownloadProcesses,
     InvalidURLError,
     VideoNotFoundError,
     _base_opts,
@@ -724,3 +725,54 @@ class TestFinalizeProcess:
             _finalize_process("yt-dlp", process=None, drainer=None)
 
         mock_logger.error.assert_not_called()
+
+
+class TestDownloadProcesses:
+    """The handle the router closes when a client disconnects.
+
+    Teardown of a registered process goes through _finalize_process and
+    _kill_process_group, so the guards on signalling live in
+    TestKillProcessGroup and TestFinalizeProcess. What is pinned here is
+    the bookkeeping those guards depend on: order, and doing nothing
+    twice.
+    """
+
+    def test_finalizes_in_reverse_registration_order(self) -> None:
+        # A pipeline comes down from its consumer end, the order
+        # _stream_mp3 used when it finalized ffmpeg before yt-dlp.
+        finalized: list[str] = []
+        processes = DownloadProcesses()
+        processes.register("yt-dlp", MagicMock(), None)
+        processes.register("ffmpeg", MagicMock(), None)
+
+        with patch(
+            "app.services.youtube._finalize_process",
+            side_effect=lambda name, process, drainer: finalized.append(name),
+        ):
+            processes.close()
+
+        assert finalized == ["ffmpeg", "yt-dlp"]
+
+    def test_second_close_finalizes_nothing(self) -> None:
+        # Both the generator's finally and the response background task
+        # call close, and on a disconnect they can overlap. The second
+        # one must not reach a process the first already reaped, whose
+        # pid may by then belong to someone else.
+        processes = DownloadProcesses()
+        processes.register("yt-dlp", MagicMock(), None)
+
+        with patch("app.services.youtube._finalize_process") as finalize:
+            processes.close()
+            processes.close()
+
+        assert finalize.call_count == 1
+
+    def test_close_without_registrations_does_nothing(self) -> None:
+        # Reached whenever the first Popen raised: the generator's
+        # finally still runs, with nothing registered to tear down.
+        processes = DownloadProcesses()
+
+        with patch("app.services.youtube._finalize_process") as finalize:
+            processes.close()
+
+        finalize.assert_not_called()
