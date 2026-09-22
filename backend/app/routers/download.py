@@ -1,6 +1,8 @@
 """API endpoint for streaming video/audio downloads."""
 
+from collections.abc import Generator
 from enum import StrEnum
+from itertools import chain
 from urllib.parse import quote
 
 from fastapi import APIRouter, Query, Request
@@ -54,7 +56,7 @@ MEDIA_TYPES = {
     },
 )
 @limiter.limit("5/minute")
-async def download_video(
+def download_video(
     request: Request,
     url: str = Query(..., description="YouTube video URL"),
     fmt: FormatType = FormatType.MP4,
@@ -64,6 +66,12 @@ async def download_video(
     """Stream a YouTube video or audio download.
 
     Pipes yt-dlp output directly to the HTTP response with zero disk I/O.
+
+    Declared sync on purpose: _start_stream blocks until yt-dlp has
+    produced its first bytes, which can take seconds. FastAPI runs sync
+    endpoints in a worker thread; as an ``async def`` that wait ran on
+    the single event loop and stalled every other request, including
+    in-flight downloads and the health check.
 
     Args:
         url: YouTube video URL.
@@ -80,8 +88,11 @@ async def download_video(
         media_type = MEDIA_TYPES[fmt]
         encoded_filename = quote(filename)
 
+        stream = stream_download(url, fmt.value, quality.value)
+        first_chunk = _start_stream(stream)
+
         return StreamingResponse(
-            content=stream_download(url, fmt.value, quality.value),
+            content=chain((first_chunk,), stream),
             media_type=media_type,
             headers={
                 "Content-Disposition": (
@@ -107,3 +118,22 @@ async def download_video(
             "Could not start the download. Please try again.",
             detail=str(e),
         )
+
+
+def _start_stream(stream: Generator[bytes]) -> bytes:
+    """Pull the first chunk so failures happen before the headers do.
+
+    ``stream_download`` is a generator function: calling it runs none of
+    its body, so a yt-dlp failure would otherwise surface only after
+    StreamingResponse has already written a 200 status line, leaving no
+    way to send the error envelope. Advancing it once here moves that
+    failure into the caller's try/except.
+
+    Raises:
+        VideoNotFoundError: If the download produced no data at all.
+        YouTubeError: For any other download failure.
+    """
+    try:
+        return next(stream)
+    except StopIteration:
+        raise VideoNotFoundError("The download produced no data.") from None
