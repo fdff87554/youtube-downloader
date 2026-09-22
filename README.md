@@ -198,6 +198,10 @@ Errors use a unified envelope:
 }
 ```
 
+One exception: a malformed or missing query parameter is answered by
+FastAPI's own request validation with `422` and a `{"detail": [...]}`
+body. Clients should handle both shapes.
+
 ## What gets logged
 
 The container writes logs to stdout/stderr only; no log file is written
