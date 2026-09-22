@@ -2,8 +2,11 @@
  * URL input component with validation feedback.
  */
 
+// Mirrors YOUTUBE_URL_PATTERN in backend/app/services/youtube.py,
+// including the case-insensitive host. The backend remains the
+// authority; this only drives the inline feedback.
 const YOUTUBE_URL_REGEX =
-  /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com|youtu\.be)\//;
+  /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com|youtu\.be)\//i;
 
 export function createUrlInput(onSubmit: (url: string) => void): HTMLElement {
   const container = document.createElement("div");

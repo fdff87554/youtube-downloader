@@ -31,4 +31,14 @@ describe("createUrlInput accessibility", () => {
     input.dispatchEvent(new Event("input"));
     expect(input.getAttribute("aria-invalid")).toBe("false");
   });
+
+  it("accepts an uppercase host", () => {
+    const view = createUrlInput(() => undefined);
+    const input = view.querySelector<HTMLInputElement>("#url-input")!;
+
+    input.value = "https://WWW.YouTube.com/watch?v=abc";
+    input.dispatchEvent(new Event("input"));
+
+    expect(input.getAttribute("aria-invalid")).toBe("false");
+  });
 });
