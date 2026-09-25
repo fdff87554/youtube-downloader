@@ -33,4 +33,19 @@ describe("createFormatPicker quality options", () => {
 
     expect(best?.textContent).toBe("Best (most compatible)");
   });
+
+  it("labels fixed qualities as ceilings, since H.264 may stop lower", () => {
+    // A video with 1080p AV1 but H.264 only up to 720p downloads at
+    // 720p for "1080", so the label must not promise 1080p.
+    const view = createFormatPicker(() => undefined);
+
+    const labels = ["1080", "720", "480"].map(
+      (value) =>
+        view.querySelector<HTMLOptionElement>(
+          `#quality-select option[value="${value}"]`,
+        )?.textContent,
+    );
+
+    expect(labels).toEqual(["Up to 1080p", "Up to 720p", "Up to 480p"]);
+  });
 });
