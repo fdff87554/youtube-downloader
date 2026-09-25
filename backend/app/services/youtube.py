@@ -440,8 +440,9 @@ def _stream_video(
 
     yt-dlp cannot produce MP4 on stdout: when it muxes to "-" it forces
     MPEG-TS (yt_dlp/downloader/external.py, ``ext == 'mp4' and
-    tmpfilename == '-'``), which QuickTime will not open and in which
-    AV1 loses its codec identification. So yt-dlp hands us Matroska,
+    tmpfilename == '-'``), which is not the video/mp4 the response
+    declares, and in which AV1 loses its codec identification (#108,
+    #112). So yt-dlp hands us Matroska,
     which is streamable and keeps every codec identifiable, and our own
     ffmpeg copies the streams into MP4 without re-encoding.
     """

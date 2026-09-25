@@ -190,7 +190,9 @@ tops out at 1080p. A video with no H.264 rendition falls back to the best
 other codec.
 
 The mp4 is fragmented MP4, the only MP4 layout that can be streamed
-without first storing the whole file. It plays in QuickTime Player.
+without first storing the whole file. H.264/AAC downloads were checked to
+open and play in QuickTime Player; files that fall back to another codec
+were not.
 
 ### `GET /api/health`
 
