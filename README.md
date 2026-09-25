@@ -49,8 +49,9 @@ Browser
 ```
 
 The download endpoint returns a `StreamingResponse` whose body is the live
-output of `yt-dlp`'s subprocess (and `ffmpeg` for MP3). Nginx is configured
-with `proxy_buffering off` so the bytes flow straight through to the client.
+output of `yt-dlp`'s subprocess piped through `ffmpeg`, which converts to MP3
+or remuxes to fragmented MP4. Nginx is configured with `proxy_buffering off`
+so the bytes flow straight through to the client.
 
 ## Quick start (Docker)
 
@@ -189,7 +190,7 @@ Macs without AV1 hardware). YouTube rarely offers H.264 above 1080p, so
 falls back to the best other codec.
 
 The mp4 is fragmented MP4, the only MP4 layout that can be streamed
-without first storing the whole file.
+without first storing the whole file. It plays in QuickTime Player.
 
 ### `GET /api/health`
 
