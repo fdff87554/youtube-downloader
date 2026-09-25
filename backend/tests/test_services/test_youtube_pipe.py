@@ -898,3 +898,53 @@ class TestDrainerThatCannotStart:
         finally:
             if _is_alive(pid):
                 os.kill(pid, signal.SIGKILL)
+
+    def _explode_after_recording(self, started: list[int]):
+        def explode(name: str, process: subprocess.Popen[bytes], tail: object) -> None:
+            started.append(process.pid)
+            raise RuntimeError("can't start new thread")
+
+        return explode
+
+    def _assert_killed(self, started: list[int]) -> None:
+        assert started, "the drainer was never reached"
+        pid = started[0]
+        try:
+            assert _wait_until_dead(pid), f"subprocess {pid} was left running"
+        finally:
+            if _is_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+
+    def test_resolver_is_killed_when_its_drainer_cannot_start(self) -> None:
+        # No response exists yet when the resolution fails, so the
+        # router's background close never runs; the resolver has to clean
+        # up after itself.
+        cmd = [sys.executable, "-c", "import time; time.sleep(60)"]
+        started: list[int] = []
+
+        with (
+            patch(
+                "app.services.youtube._start_stderr_drainer",
+                self._explode_after_recording(started),
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            _extract_info_json(cmd, processes=DownloadProcesses())
+
+        self._assert_killed(started)
+
+    def test_mp4_download_leaves_no_resolver_behind(self) -> None:
+        cmd = [sys.executable, "-c", "import time; time.sleep(60)"]
+        started: list[int] = []
+
+        with (
+            patch("app.services.youtube._build_info_command", return_value=cmd),
+            patch(
+                "app.services.youtube._start_stderr_drainer",
+                self._explode_after_recording(started),
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            next(stream_download("https://www.youtube.com/watch?v=test", "mp4"))
+
+        self._assert_killed(started)

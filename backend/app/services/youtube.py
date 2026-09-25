@@ -461,15 +461,22 @@ def _extract_info_json(cmd: list[str], *, processes: DownloadProcesses) -> bytes
         )
     except FileNotFoundError as e:
         raise YouTubeError("yt-dlp is not installed or not in PATH.") from e
-    drainer = processes.register("yt-dlp", process, tail)
-    info_json = _stdout_of(process).read()
-    # Same ordering as the pipeline: clean the group up (deno runs in it)
-    # while the pid is still held, then reap.
-    _await_exit_without_reaping(process)
-    _kill_process_group(process)
-    if process.wait() != 0:
-        _raise_from_subprocess_failure("yt-dlp", process.returncode, tail, drainer)
-    return info_json
+    try:
+        drainer = processes.register("yt-dlp", process, tail)
+        info_json = _stdout_of(process).read()
+        # Same ordering as the pipeline: clean the group up (deno runs in
+        # it) while the pid is still held, then reap.
+        _await_exit_without_reaping(process)
+        _kill_process_group(process)
+        if process.wait() != 0:
+            _raise_from_subprocess_failure("yt-dlp", process.returncode, tail, drainer)
+        return info_json
+    finally:
+        # Nothing else can reach this process if we fail here: the router
+        # only attaches processes.close to a response, and a failure now
+        # means no response is ever built. After a clean exit the process
+        # is already reaped, so this only drops it from the registry.
+        processes.close()
 
 
 def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
