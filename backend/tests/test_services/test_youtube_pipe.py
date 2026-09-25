@@ -43,7 +43,9 @@ def _is_alive(pid: int) -> bool:
     try:
         with open(PROC_STATUS.format(pid=pid)) as stat:
             state = stat.read().rsplit(") ", 1)[1].split()[0]
-    except FileNotFoundError:
+    # ESRCH, not ENOENT, is what the kernel returns when the pid is
+    # reaped between the lookup and the read. Either way it is gone.
+    except FileNotFoundError, ProcessLookupError:
         return False
     return state != "Z"
 

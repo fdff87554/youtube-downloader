@@ -11,7 +11,8 @@ ever writing the video to disk.
 - **Stateless backend.** No database, no sessions, no per-user state.
 - **Single-container deployment.** `nginx` serves the static frontend and
   reverse-proxies the API to `uvicorn` in one image.
-- **MP4 video and MP3 audio.** Quality selection up to the best available.
+- **MP4 video and MP3 audio.** Quality selection up to 1080p or higher, with
+  the most widely supported codecs preferred.
 - **Playlist support.** Browse playlist entries and download videos one by
   one.
 - **Reproducible builds.** Backend dependencies are pinned in
@@ -181,10 +182,11 @@ URL, returns `PlaylistInfo`.
 Streams the media as `video/mp4` or `audio/mpeg` with `Content-Disposition:
 attachment`.
 
-For `fmt=mp4`, H.264 video and AAC audio are preferred over AV1 and VP9 so
-the file plays on car head units, older TVs and QuickTime. YouTube rarely
-offers H.264 above 1080p, so `quality=best` usually tops out at 1080p. A
-video with no H.264 rendition falls back to the best other codec.
+For `fmt=mp4`, H.264 video and AAC audio are preferred over AV1 and VP9,
+because far more hardware decoders support them (car head units, older TVs,
+Macs without AV1 hardware). YouTube rarely offers H.264 above 1080p, so
+`quality=best` usually tops out at 1080p. A video with no H.264 rendition
+falls back to the best other codec.
 
 The mp4 is fragmented MP4, the only MP4 layout that can be streamed
 without first storing the whole file.

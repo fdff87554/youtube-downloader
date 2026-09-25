@@ -20,3 +20,17 @@ describe("createFormatPicker accessibility", () => {
     expect(qualitySelect).not.toBeNull();
   });
 });
+
+describe("createFormatPicker quality options", () => {
+  it("labels best as the most compatible choice, not the highest resolution", () => {
+    // The backend prefers H.264 for compatibility, so best usually tops
+    // out at 1080p even when a 4K AV1 rendition exists.
+    const view = createFormatPicker(() => undefined);
+
+    const best = view.querySelector<HTMLOptionElement>(
+      '#quality-select option[value="best"]',
+    );
+
+    expect(best?.textContent).toBe("Best (most compatible)");
+  });
+});
