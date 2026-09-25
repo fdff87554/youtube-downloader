@@ -368,6 +368,79 @@ class TestProgressiveFallbackThroughTheRemux:
             b"".join(stream_download("https://www.youtube.com/watch?v=test", "mp4"))
 
 
+class TestFailureBeforeTheFirstChunkIsSent:
+    """A stage that fails early must fail before anything is yielded.
+
+    The router commits the 200 with the first chunk, so bytes yielded
+    ahead of a failure turn an error response into an aborted download.
+    """
+
+    def test_failure_after_a_short_output_yields_nothing(self) -> None:
+        producer = _python("import sys; sys.stdout.buffer.write(b'header')")
+        failing_stage = _python(
+            "import sys\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\n"
+            "sys.exit(1)\n"
+        )
+        stream = _stream_through_ffmpeg(
+            producer, failing_stage, processes=DownloadProcesses()
+        )
+
+        with pytest.raises(YouTubeError, match="ffmpeg failed"):
+            next(stream)
+
+    def test_output_spanning_several_chunks_still_arrives_whole(self) -> None:
+        payload_size = 3 * 65536 + 123
+        producer = _python(
+            f"import sys; sys.stdout.buffer.write(b'a' * {payload_size})"
+        )
+
+        result = b"".join(
+            _stream_through_ffmpeg(producer, PASSTHROUGH, processes=DownloadProcesses())
+        )
+
+        assert result == b"a" * payload_size
+
+
+@needs_ffmpeg
+class TestUnreadableInputOverHttp:
+    """What the client sees when the remux cannot read its input (#114)."""
+
+    def test_moov_last_input_is_an_error_response_not_a_video(
+        self, client, tmp_path: pathlib.Path
+    ) -> None:
+        source = _progressive_mp4(tmp_path / "tail.mp4", moov_first=False)
+
+        with patch(
+            "app.services.youtube._build_video_command", return_value=_cat(source)
+        ):
+            response = client.get(
+                "/api/download",
+                params={"url": "https://www.youtube.com/watch?v=test", "fmt": "mp4"},
+            )
+
+        assert response.status_code == 500
+        assert response.headers["content-type"] == "application/json"
+        assert response.json()["error"]["code"] == "download_error"
+
+    def test_moov_first_input_is_served_with_samples(
+        self, client, tmp_path: pathlib.Path
+    ) -> None:
+        source = _progressive_mp4(tmp_path / "head.mp4", moov_first=True)
+
+        with patch(
+            "app.services.youtube._build_video_command", return_value=_cat(source)
+        ):
+            response = client.get(
+                "/api/download",
+                params={"url": "https://www.youtube.com/watch?v=test", "fmt": "mp4"},
+            )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "video/mp4"
+        assert "mdat" in _top_level_boxes(response.content, 5)
+
+
 class TestFinalizeProcessKillsGrandchildren:
     """yt-dlp spawns ffmpeg itself when it has to mux two streams.
 

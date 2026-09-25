@@ -524,11 +524,21 @@ def _stream_through_ffmpeg(
 
         if ffmpeg_proc.stdout is None:
             raise YouTubeError("Failed to open ffmpeg stdout pipe.")
+        # One chunk is held back until the exit statuses are known. The
+        # router sends the 200 as soon as the first chunk arrives, so a
+        # stage that fails after writing only a header -- ffmpeg emits
+        # about 1.3 KB of ftyp/moov before it discovers an unreadable
+        # input -- used to reach the client as an aborted video/mp4.
+        # Held back, a failure within the first chunk surfaces before the
+        # headers and becomes an error response instead.
+        held = b""
         while True:
             chunk = ffmpeg_proc.stdout.read(CHUNK_SIZE)
             if not chunk:
                 break
-            yield chunk
+            if held:
+                yield held
+            held = chunk
 
         # A non-zero exit below means the download failed; without the
         # checks the generator would end normally and the caller would
@@ -552,6 +562,8 @@ def _stream_through_ffmpeg(
             _raise_from_subprocess_failure(
                 "ffmpeg", ffmpeg_proc.returncode, ffmpeg_tail, ffmpeg_drainer
             )
+        if held:
+            yield held
     finally:
         # Reverse registration order, so the pipeline comes down from
         # its consumer end -- the order this block used before teardown
