@@ -29,7 +29,6 @@ from app.services.youtube import (
     YouTubeError,
     _build_video_command,
     _finalize_process,
-    _run_piped_process,
     _stream_through_ffmpeg,
     stream_download,
 )
@@ -74,23 +73,7 @@ def _wait_until_dead(pid: int, timeout: float = 5.0) -> bool:
     return False
 
 
-class TestRunPipedProcess:
-    def test_yields_full_stdout_as_chunks(self) -> None:
-        # Payload spans multiple CHUNK_SIZE (64 KiB) reads to verify
-        # chunk assembly is lossless.
-        payload_size = 200_000
-        cmd = [
-            sys.executable,
-            "-c",
-            f"import sys; sys.stdout.buffer.write(b'a' * {payload_size})",
-        ]
-
-        result = b"".join(
-            _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
-        )
-
-        assert result == b"a" * payload_size
-
+class TestStreamOutcomes:
     def test_drains_stderr_without_blocking_stdout(self) -> None:
         # Write enough stderr to overflow the default pipe buffer (~64
         # KiB on Linux) before producing any stdout. Without the stderr
@@ -106,18 +89,10 @@ class TestRunPipedProcess:
         ]
 
         result = b"".join(
-            _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
+            _stream_through_ffmpeg(cmd, PASSTHROUGH, processes=DownloadProcesses())
         )
 
         assert result == b"payload"
-
-    def test_raises_youtube_error_when_binary_missing(self) -> None:
-        with pytest.raises(YouTubeError, match="not installed"):
-            list(
-                _run_piped_process(
-                    ["/no/such/binary"], name="missing", processes=DownloadProcesses()
-                )
-            )
 
     def test_raises_when_process_exits_non_zero_after_empty_stdout(self) -> None:
         # The failure mode that made an unavailable video look like a
@@ -125,7 +100,9 @@ class TestRunPipedProcess:
         cmd = [sys.executable, "-c", "import sys; sys.exit(1)"]
 
         with pytest.raises(YouTubeError, match="exited with code 1"):
-            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
+            list(
+                _stream_through_ffmpeg(cmd, PASSTHROUGH, processes=DownloadProcesses())
+            )
 
     def test_raises_when_process_exits_non_zero_after_partial_stdout(self) -> None:
         cmd = [
@@ -135,7 +112,9 @@ class TestRunPipedProcess:
         ]
 
         with pytest.raises(YouTubeError):
-            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
+            list(
+                _stream_through_ffmpeg(cmd, PASSTHROUGH, processes=DownloadProcesses())
+            )
 
     def test_reports_unavailable_video_as_not_found(self) -> None:
         # yt-dlp writes the reason to stderr and exits non-zero; the
@@ -149,7 +128,9 @@ class TestRunPipedProcess:
         ]
 
         with pytest.raises(VideoNotFoundError, match="Video unavailable"):
-            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
+            list(
+                _stream_through_ffmpeg(cmd, PASSTHROUGH, processes=DownloadProcesses())
+            )
 
     def test_reports_unsupported_url_as_such(self) -> None:
         # What the CLI prints when the extractor allow-list refuses a
@@ -163,14 +144,16 @@ class TestRunPipedProcess:
         ]
 
         with pytest.raises(UnsupportedURLError, match="No suitable extractor"):
-            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
+            list(
+                _stream_through_ffmpeg(cmd, PASSTHROUGH, processes=DownloadProcesses())
+            )
 
     def test_clean_exit_with_output_does_not_raise(self) -> None:
         cmd = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok')"]
 
         assert (
             b"".join(
-                _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
+                _stream_through_ffmpeg(cmd, PASSTHROUGH, processes=DownloadProcesses())
             )
             == b"ok"
         )
@@ -386,8 +369,8 @@ class TestGrandchildOutlivingTheParent:
 
         assert (
             b"".join(
-                _run_piped_process(
-                    self._spawner(marker, 0), name="fake", processes=DownloadProcesses()
+                _stream_through_ffmpeg(
+                    self._spawner(marker, 0), PASSTHROUGH, processes=DownloadProcesses()
                 )
             )
             == b"data"
@@ -406,8 +389,8 @@ class TestGrandchildOutlivingTheParent:
 
         with pytest.raises(YouTubeError, match="exited with code 1"):
             list(
-                _run_piped_process(
-                    self._spawner(marker, 1), name="fake", processes=DownloadProcesses()
+                _stream_through_ffmpeg(
+                    self._spawner(marker, 1), PASSTHROUGH, processes=DownloadProcesses()
                 )
             )
 
@@ -459,8 +442,8 @@ class TestCloseWhileTheGeneratorIsSuspended:
     ) -> None:
         marker = tmp_path / "pids"
         processes = DownloadProcesses()
-        stream = _run_piped_process(
-            self._forever_with_grandchild(marker), name="fake", processes=processes
+        stream = _stream_through_ffmpeg(
+            self._forever_with_grandchild(marker), PASSTHROUGH, processes=processes
         )
 
         assert next(stream)  # the pipeline is live and streaming
@@ -492,8 +475,8 @@ class TestCloseWhileTheGeneratorIsSuspended:
         # and may belong to someone else, so nothing may be signalled.
         marker = tmp_path / "pids"
         processes = DownloadProcesses()
-        stream = _run_piped_process(
-            self._forever_with_grandchild(marker), name="fake", processes=processes
+        stream = _stream_through_ffmpeg(
+            self._forever_with_grandchild(marker), PASSTHROUGH, processes=processes
         )
 
         assert next(stream)
@@ -524,7 +507,7 @@ class TestDrainerThatCannotStart:
             started.append(process.pid)
             raise RuntimeError("can't start new thread")
 
-        stream = _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
+        stream = _stream_through_ffmpeg(cmd, PASSTHROUGH, processes=DownloadProcesses())
 
         with (
             patch("app.services.youtube._start_stderr_drainer", explode),

@@ -523,8 +523,13 @@ def _stream_through_ffmpeg(
                 break
             yield chunk
 
-        # Same ordering as the single-process path: reach each group
-        # while its leader still holds its pid.
+        # A non-zero exit below means the download failed; without the
+        # checks the generator would end normally and the caller would
+        # serve a successful-looking but truncated response.
+        #
+        # Clean each group up before reaping it: yt-dlp can exit while
+        # the ffmpeg it started for muxing is still alive, and once the
+        # pid is released there is no safe way to reach that grandchild.
         for proc in (ytdlp_proc, ffmpeg_proc):
             _await_exit_without_reaping(proc)
             _kill_process_group(proc)
@@ -544,53 +549,6 @@ def _stream_through_ffmpeg(
         # Reverse registration order, so the pipeline comes down from
         # its consumer end -- the order this block used before teardown
         # moved behind a single locked entry point.
-        processes.close()
-
-
-def _run_piped_process(
-    cmd: list[str],
-    name: str = "yt-dlp",
-    *,
-    processes: DownloadProcesses,
-) -> Generator[bytes]:
-    stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
-    try:
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                # Own session, so teardown can signal the whole group.
-                start_new_session=True,
-            )
-        except FileNotFoundError as e:
-            raise YouTubeError("yt-dlp is not installed or not in PATH.") from e
-
-        drainer = processes.register(name, process, stderr_tail)
-
-        if process.stdout is None:
-            raise YouTubeError("Failed to open stdout pipe.")
-        while True:
-            chunk = process.stdout.read(CHUNK_SIZE)
-            if not chunk:
-                break
-            yield chunk
-
-        # stdout hit EOF, so the process is on its way out. A non-zero
-        # exit here means the download failed; without this the
-        # generator would end normally and the caller would serve a
-        # successful-looking but empty response.
-        #
-        # Clean the group up before reaping: yt-dlp can exit while the
-        # ffmpeg it started for muxing is still alive, and once the pid
-        # is released there is no safe way to reach that grandchild.
-        _await_exit_without_reaping(process)
-        _kill_process_group(process)
-        if process.wait() != 0:
-            _raise_from_subprocess_failure(
-                name, process.returncode, stderr_tail, drainer
-            )
-    finally:
         processes.close()
 
 
