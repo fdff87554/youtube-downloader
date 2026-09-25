@@ -188,8 +188,8 @@ because far more hardware decoders support them, such as car head units and
 older TVs. YouTube rarely offers H.264 above 1080p, so `quality=best` usually
 tops out at 1080p. The fixed qualities are ceilings: when a video offers
 H.264 only below the requested height, that lower H.264 is chosen over a
-taller AV1 or VP9 rendition. A video with no H.264 rendition falls back to
-the best other codec.
+taller AV1 or VP9 rendition. When no H.264 rendition fits the ceiling, the
+best other codec within it is chosen.
 
 The mp4 is fragmented MP4, the only MP4 layout that can be streamed
 without first storing the whole file. H.264/AAC downloads were checked to
