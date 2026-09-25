@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -25,8 +27,11 @@ from app.services.youtube import (
     UnsupportedURLError,
     VideoNotFoundError,
     YouTubeError,
+    _build_video_commands,
     _finalize_process,
-    _run_piped_process,
+    _fragmented_mp4_command,
+    _stream_through_ffmpeg,
+    stream_download,
 )
 
 # Linux-only: the project ships as a Linux container and CI runs on
@@ -39,9 +44,42 @@ def _is_alive(pid: int) -> bool:
     try:
         with open(PROC_STATUS.format(pid=pid)) as stat:
             state = stat.read().rsplit(") ", 1)[1].split()[0]
-    except FileNotFoundError:
+    # ESRCH, not ENOENT, is what the kernel returns when the pid is
+    # reaped between the lookup and the read. Either way it is gone.
+    except FileNotFoundError, ProcessLookupError:
         return False
     return state != "Z"
+
+
+def _python(source: str) -> list[str]:
+    return [sys.executable, "-c", source]
+
+
+# The ffmpeg stand-ins get their inputs the way ffmpeg does, as pipe:<fd>
+# arguments; this reads all of them, in order, into `data`.
+READ_INPUTS = (
+    "import os, sys\n"
+    "data = b''.join(\n"
+    "    chunk\n"
+    "    for arg in sys.argv[1:]\n"
+    "    for chunk in iter(lambda: os.read(int(arg[5:]), 65536), b''))\n"
+)
+
+
+def _stage(source: str):
+    """An ffmpeg stand-in: ``source`` runs with the inputs in its argv."""
+    return lambda inputs: [*_python(source), *inputs]
+
+
+# Copies each input to stdout as it arrives, so a stream that never ends
+# still reaches the reader.
+_passthrough = _stage(
+    "import os, sys\n"
+    "for arg in sys.argv[1:]:\n"
+    "    while chunk := os.read(int(arg[5:]), 65536):\n"
+    "        sys.stdout.buffer.write(chunk)\n"
+    "        sys.stdout.buffer.flush()\n"
+)
 
 
 def _wait_until_dead(pid: int, timeout: float = 5.0) -> bool:
@@ -53,23 +91,7 @@ def _wait_until_dead(pid: int, timeout: float = 5.0) -> bool:
     return False
 
 
-class TestRunPipedProcess:
-    def test_yields_full_stdout_as_chunks(self) -> None:
-        # Payload spans multiple CHUNK_SIZE (64 KiB) reads to verify
-        # chunk assembly is lossless.
-        payload_size = 200_000
-        cmd = [
-            sys.executable,
-            "-c",
-            f"import sys; sys.stdout.buffer.write(b'a' * {payload_size})",
-        ]
-
-        result = b"".join(
-            _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
-        )
-
-        assert result == b"a" * payload_size
-
+class TestStreamOutcomes:
     def test_drains_stderr_without_blocking_stdout(self) -> None:
         # Write enough stderr to overflow the default pipe buffer (~64
         # KiB on Linux) before producing any stdout. Without the stderr
@@ -85,18 +107,10 @@ class TestRunPipedProcess:
         ]
 
         result = b"".join(
-            _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
+            _stream_through_ffmpeg([cmd], _passthrough, processes=DownloadProcesses())
         )
 
         assert result == b"payload"
-
-    def test_raises_youtube_error_when_binary_missing(self) -> None:
-        with pytest.raises(YouTubeError, match="not installed"):
-            list(
-                _run_piped_process(
-                    ["/no/such/binary"], name="missing", processes=DownloadProcesses()
-                )
-            )
 
     def test_raises_when_process_exits_non_zero_after_empty_stdout(self) -> None:
         # The failure mode that made an unavailable video look like a
@@ -104,7 +118,11 @@ class TestRunPipedProcess:
         cmd = [sys.executable, "-c", "import sys; sys.exit(1)"]
 
         with pytest.raises(YouTubeError, match="exited with code 1"):
-            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
+            list(
+                _stream_through_ffmpeg(
+                    [cmd], _passthrough, processes=DownloadProcesses()
+                )
+            )
 
     def test_raises_when_process_exits_non_zero_after_partial_stdout(self) -> None:
         cmd = [
@@ -114,7 +132,11 @@ class TestRunPipedProcess:
         ]
 
         with pytest.raises(YouTubeError):
-            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
+            list(
+                _stream_through_ffmpeg(
+                    [cmd], _passthrough, processes=DownloadProcesses()
+                )
+            )
 
     def test_reports_unavailable_video_as_not_found(self) -> None:
         # yt-dlp writes the reason to stderr and exits non-zero; the
@@ -128,7 +150,11 @@ class TestRunPipedProcess:
         ]
 
         with pytest.raises(VideoNotFoundError, match="Video unavailable"):
-            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
+            list(
+                _stream_through_ffmpeg(
+                    [cmd], _passthrough, processes=DownloadProcesses()
+                )
+            )
 
     def test_reports_unsupported_url_as_such(self) -> None:
         # What the CLI prints when the extractor allow-list refuses a
@@ -142,21 +168,413 @@ class TestRunPipedProcess:
         ]
 
         with pytest.raises(UnsupportedURLError, match="No suitable extractor"):
-            list(_run_piped_process(cmd, name="fake", processes=DownloadProcesses()))
+            list(
+                _stream_through_ffmpeg(
+                    [cmd], _passthrough, processes=DownloadProcesses()
+                )
+            )
 
     def test_clean_exit_with_output_does_not_raise(self) -> None:
         cmd = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok')"]
 
         assert (
             b"".join(
-                _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
+                _stream_through_ffmpeg(
+                    [cmd], _passthrough, processes=DownloadProcesses()
+                )
             )
             == b"ok"
         )
 
 
+class TestStreamThroughFfmpeg:
+    """The two-stage pipeline shared by the mp3 and mp4 paths."""
+
+    def test_yields_the_second_stage_output_in_full(self) -> None:
+        payload_size = 200_000
+        producer = _python(
+            f"import sys; sys.stdout.buffer.write(b'a' * {payload_size})"
+        )
+
+        result = b"".join(
+            _stream_through_ffmpeg(
+                [producer], _passthrough, processes=DownloadProcesses()
+            )
+        )
+
+        assert result == b"a" * payload_size
+
+    def test_raises_when_a_binary_is_missing(self) -> None:
+        with pytest.raises(YouTubeError, match="not installed"):
+            list(
+                _stream_through_ffmpeg(
+                    [["/no/such/binary"]], _passthrough, processes=DownloadProcesses()
+                )
+            )
+
+    def test_reports_the_ffmpeg_stage_failing(self) -> None:
+        producer = _python("import sys; sys.stdout.buffer.write(b'data')")
+        failing_stage = _stage(
+            READ_INPUTS
+            + "sys.stderr.write('Invalid data found when processing input\\n')\n"
+            "sys.exit(1)\n"
+        )
+
+        with pytest.raises(YouTubeError, match="ffmpeg failed: Invalid data"):
+            list(
+                _stream_through_ffmpeg(
+                    [producer], failing_stage, processes=DownloadProcesses()
+                )
+            )
+
+    def test_reports_yt_dlp_when_both_stages_fail(self) -> None:
+        # ffmpeg failing on a truncated input is only a consequence;
+        # the reason worth reporting is on yt-dlp's stderr.
+        producer = _python(
+            "import sys\nsys.stderr.write('ERROR: Video unavailable\\n')\nsys.exit(1)\n"
+        )
+        failing_stage = _stage(READ_INPUTS + "sys.exit(1)\n")
+
+        with pytest.raises(VideoNotFoundError, match="Video unavailable"):
+            list(
+                _stream_through_ffmpeg(
+                    [producer], failing_stage, processes=DownloadProcesses()
+                )
+            )
+
+    def test_every_source_reaches_the_stage_in_order(self) -> None:
+        video = _python("import sys; sys.stdout.buffer.write(b'video')")
+        audio = _python("import sys; sys.stdout.buffer.write(b'audio')")
+
+        result = b"".join(
+            _stream_through_ffmpeg(
+                [video, audio], _passthrough, processes=DownloadProcesses()
+            )
+        )
+
+        assert result == b"videoaudio"
+
+    def test_reports_the_second_source_failing(self) -> None:
+        video = _python("import sys; sys.stdout.buffer.write(b'video')")
+        audio = _python(
+            "import sys\nsys.stderr.write('ERROR: Video unavailable\\n')\nsys.exit(1)\n"
+        )
+
+        with pytest.raises(VideoNotFoundError, match="Video unavailable"):
+            list(
+                _stream_through_ffmpeg(
+                    [video, audio], _passthrough, processes=DownloadProcesses()
+                )
+            )
+
+
+def _top_level_boxes(data: bytes, count: int) -> list[str]:
+    """Names of the first ``count`` ISO BMFF boxes in ``data``."""
+    names = []
+    offset = 0
+    while len(names) < count and offset + 8 <= len(data):
+        size = int.from_bytes(data[offset : offset + 4], "big")
+        names.append(data[offset + 4 : offset + 8].decode("latin-1"))
+        if size < 8:
+            break
+        offset += size
+    return names
+
+
+# Skipped locally when ffmpeg is missing, but never in CI (GitHub sets
+# CI=true): there a missing ffmpeg must fail these tests, not hide them.
+needs_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None and not os.environ.get("CI"),
+    reason="needs ffmpeg",
+)
+
+
+def _lavfi(source: str, codec: list[str]) -> list[str]:
+    """Stands in for one yt-dlp: a two-second single-track stream."""
+    return [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        source,
+        *codec,
+        "-f",
+        "matroska",
+        "pipe:1",
+    ]
+
+
+LAVFI_VIDEO = _lavfi("testsrc=duration=2:size=320x240:rate=25", ["-c:v", "mpeg4"])
+LAVFI_AUDIO = _lavfi("sine=duration=2", ["-c:a", "aac"])
+
+
+def _stream_types(data: bytes) -> list[str]:
+    """Stream types ffmpeg finds in ``data``, e.g. ["video", "audio"].
+
+    Parsed from ffmpeg's own input summary rather than ffprobe, so these
+    tests need one binary, not two.
+    """
+    probe = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-i", "pipe:0", "-f", "null", "-"],
+        input=data,
+        capture_output=True,
+        check=True,
+    )
+    # Only the input summary: the null output lists its streams too.
+    input_summary = probe.stderr.split(b"Stream mapping:")[0]
+    found = re.findall(rb"Stream #0:\d+\S*: (Video|Audio):", input_summary)
+    return [kind.decode().lower() for kind in found]
+
+
+def _audio_seconds(data: bytes) -> float:
+    """How long the audio track in ``data`` runs, read by copying it out.
+
+    The last ``time=`` in ffmpeg's progress is where the copied stream
+    ended, so a truncated track reports less than its source.
+    """
+    copy = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-i", "pipe:0", "-map", "0:a", "-c", "copy"]
+        + ["-f", "null", "-"],
+        input=data,
+        capture_output=True,
+        check=True,
+    )
+    hours, minutes, seconds = re.findall(rb"time=(\d+):(\d+):(\d+\.\d+)", copy.stderr)[
+        -1
+    ]
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+# LAVFI_AUDIO's length, and how far the merged track may drift from it
+# (AAC frames are 1024 samples, about 23 ms at 44.1 kHz).
+LAVFI_AUDIO_SECONDS = 2.0
+AUDIO_LENGTH_TOLERANCE = 0.1
+
+
+class TestVideoIsMergedByOurOwnFfmpeg:
+    """Video and audio are fetched separately and merged into fragmented MP4.
+
+    A single yt-dlp merging them hands ffmpeg unchunked requests, which
+    YouTube throttles and which truncated the audio (#115); it also forces
+    MPEG-TS on stdout (#108).
+    """
+
+    @pytest.mark.parametrize("quality", ["best", "1080", "720", "480"])
+    def test_each_yt_dlp_fetches_a_single_format(self, quality: str) -> None:
+        commands = _build_video_commands(
+            "https://www.youtube.com/watch?v=test", quality
+        )
+
+        for cmd in commands:
+            assert "+" not in cmd[cmd.index("-f") + 1]
+            assert "--merge-output-format" not in cmd
+
+    def test_video_goes_through_the_remux_stage(self) -> None:
+        with patch(
+            "app.services.youtube._stream_through_ffmpeg", return_value=iter(())
+        ) as pipeline:
+            list(stream_download("https://www.youtube.com/watch?v=test", "mp4"))
+
+        assert pipeline.call_args.args[1] is _fragmented_mp4_command
+
+    @needs_ffmpeg
+    def test_output_is_a_fragmented_mp4(self) -> None:
+        with patch(
+            "app.services.youtube._build_video_commands",
+            return_value=(LAVFI_VIDEO, LAVFI_AUDIO),
+        ):
+            output = b"".join(
+                stream_download("https://www.youtube.com/watch?v=test", "mp4")
+            )
+
+        assert _top_level_boxes(output, 3) == ["ftyp", "moov", "moof"]
+
+    @needs_ffmpeg
+    def test_output_carries_the_video_of_one_and_the_audio_of_the_other(
+        self,
+    ) -> None:
+        with patch(
+            "app.services.youtube._build_video_commands",
+            return_value=(LAVFI_VIDEO, LAVFI_AUDIO),
+        ):
+            output = b"".join(
+                stream_download("https://www.youtube.com/watch?v=test", "mp4")
+            )
+
+        assert _stream_types(output) == ["video", "audio"]
+
+    @needs_ffmpeg
+    def test_merged_audio_runs_the_full_length_of_its_source(self) -> None:
+        # Guards our own pipeline cutting the audio short, the symptom of
+        # #115. It cannot reproduce #115's cause: YouTube throttling an
+        # unchunked request only happens against YouTube.
+        with patch(
+            "app.services.youtube._build_video_commands",
+            return_value=(LAVFI_VIDEO, LAVFI_AUDIO),
+        ):
+            output = b"".join(
+                stream_download("https://www.youtube.com/watch?v=test", "mp4")
+            )
+
+        assert _audio_seconds(output) == pytest.approx(
+            LAVFI_AUDIO_SECONDS, abs=AUDIO_LENGTH_TOLERANCE
+        )
+
+
+def _progressive_mp4(path: pathlib.Path, *, moov_first: bool) -> pathlib.Path:
+    """Write a short single-file MP4 with its moov at the front or the end."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=2:size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=duration=2",
+            "-c:v",
+            "mpeg4",
+            "-c:a",
+            "aac",
+            *(["-movflags", "+faststart"] if moov_first else []),
+            str(path),
+        ],
+        check=True,
+    )
+    return path
+
+
+def _cat(path: pathlib.Path) -> list[str]:
+    # Stands in for yt-dlp handing over a single progressive format,
+    # which it writes to stdout unchanged.
+    return [
+        sys.executable,
+        "-c",
+        f"import shutil, sys; shutil.copyfileobj(open({str(path)!r}, 'rb'), "
+        "sys.stdout.buffer)",
+    ]
+
+
+@needs_ffmpeg
+class TestProgressiveFallbackThroughTheRemux:
+    """The single-format fallback reaches the remux stage as a plain MP4.
+
+    ffmpeg can only read that from a pipe when the moov comes first.
+    YouTube's progressive itag 18 was observed with moov first; the other
+    layout has to fail loudly rather than pass as an empty success.
+    """
+
+    def test_moov_first_is_remuxed(self, tmp_path: pathlib.Path) -> None:
+        source = _progressive_mp4(tmp_path / "head.mp4", moov_first=True)
+
+        with patch(
+            "app.services.youtube._build_video_commands",
+            return_value=(_cat(source), _cat(source)),
+        ):
+            output = b"".join(
+                stream_download("https://www.youtube.com/watch?v=test", "mp4")
+            )
+
+        assert _top_level_boxes(output, 3) == ["ftyp", "moov", "moof"]
+
+    def test_moov_last_fails_instead_of_serving_an_empty_file(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        source = _progressive_mp4(tmp_path / "tail.mp4", moov_first=False)
+
+        with (
+            patch(
+                "app.services.youtube._build_video_commands",
+                return_value=(_cat(source), _cat(source)),
+            ),
+            pytest.raises(YouTubeError, match="ffmpeg failed"),
+        ):
+            b"".join(stream_download("https://www.youtube.com/watch?v=test", "mp4"))
+
+
+class TestFailureBeforeTheFirstChunkIsSent:
+    """A stage that fails early must fail before anything is yielded.
+
+    The router commits the 200 with the first chunk, so bytes yielded
+    ahead of a failure turn an error response into an aborted download.
+    """
+
+    def test_failure_after_a_short_output_yields_nothing(self) -> None:
+        producer = _python("import sys; sys.stdout.buffer.write(b'header')")
+        failing_stage = _stage(
+            READ_INPUTS + "sys.stdout.buffer.write(data)\nsys.exit(1)\n"
+        )
+        stream = _stream_through_ffmpeg(
+            [producer], failing_stage, processes=DownloadProcesses()
+        )
+
+        with pytest.raises(YouTubeError, match="ffmpeg failed"):
+            next(stream)
+
+    def test_output_spanning_several_chunks_still_arrives_whole(self) -> None:
+        payload_size = 3 * 65536 + 123
+        producer = _python(
+            f"import sys; sys.stdout.buffer.write(b'a' * {payload_size})"
+        )
+
+        result = b"".join(
+            _stream_through_ffmpeg(
+                [producer], _passthrough, processes=DownloadProcesses()
+            )
+        )
+
+        assert result == b"a" * payload_size
+
+
+@needs_ffmpeg
+class TestUnreadableInputOverHttp:
+    """What the client sees when the remux cannot read its input (#114)."""
+
+    def test_moov_last_input_is_an_error_response_not_a_video(
+        self, client, tmp_path: pathlib.Path
+    ) -> None:
+        source = _progressive_mp4(tmp_path / "tail.mp4", moov_first=False)
+
+        with patch(
+            "app.services.youtube._build_video_commands",
+            return_value=(_cat(source), _cat(source)),
+        ):
+            response = client.get(
+                "/api/download",
+                params={"url": "https://www.youtube.com/watch?v=test", "fmt": "mp4"},
+            )
+
+        assert response.status_code == 500
+        assert response.headers["content-type"] == "application/json"
+        assert response.json()["error"]["code"] == "download_error"
+
+    def test_moov_first_input_is_served_with_samples(
+        self, client, tmp_path: pathlib.Path
+    ) -> None:
+        source = _progressive_mp4(tmp_path / "head.mp4", moov_first=True)
+
+        with patch(
+            "app.services.youtube._build_video_commands",
+            return_value=(_cat(source), _cat(source)),
+        ):
+            response = client.get(
+                "/api/download",
+                params={"url": "https://www.youtube.com/watch?v=test", "fmt": "mp4"},
+            )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "video/mp4"
+        assert "mdat" in _top_level_boxes(response.content, 5)
+
+
 class TestFinalizeProcessKillsGrandchildren:
-    """yt-dlp spawns ffmpeg itself when it has to mux two streams.
+    """yt-dlp spawns processes of its own, such as deno and ffmpeg.
 
     Signalling only the direct child left that grandchild holding two
     HTTPS connections, with no socket timeout of its own, for as long
@@ -205,9 +623,9 @@ class TestFinalizeProcessKillsGrandchildren:
 
 
 class TestGrandchildOutlivingTheParent:
-    """The case that matters in production: yt-dlp exits, ffmpeg does not.
+    """The case that matters in production: yt-dlp exits, its child does not.
 
-    yt-dlp starts ffmpeg itself to mux separate streams, so the direct
+    yt-dlp starts processes of its own (deno, ffmpeg), so the direct
     child can finish while the grandchild is still running. The stream
     body reaps the child to read its exit status, and a reaped pid can
     be neither found (os.getpgid raises) nor trusted (the number may
@@ -241,8 +659,10 @@ class TestGrandchildOutlivingTheParent:
 
         assert (
             b"".join(
-                _run_piped_process(
-                    self._spawner(marker, 0), name="fake", processes=DownloadProcesses()
+                _stream_through_ffmpeg(
+                    [self._spawner(marker, 0)],
+                    _passthrough,
+                    processes=DownloadProcesses(),
                 )
             )
             == b"data"
@@ -261,8 +681,10 @@ class TestGrandchildOutlivingTheParent:
 
         with pytest.raises(YouTubeError, match="exited with code 1"):
             list(
-                _run_piped_process(
-                    self._spawner(marker, 1), name="fake", processes=DownloadProcesses()
+                _stream_through_ffmpeg(
+                    [self._spawner(marker, 1)],
+                    _passthrough,
+                    processes=DownloadProcesses(),
                 )
             )
 
@@ -291,7 +713,7 @@ class TestCloseWhileTheGeneratorIsSuspended:
 
     def _forever_with_grandchild(self, marker: pathlib.Path) -> list[str]:
         # Streams until killed, so the generator stays suspended at a
-        # yield, and starts a grandchild the way yt-dlp starts ffmpeg.
+        # yield, and starts a grandchild the way yt-dlp starts deno.
         # The grandchild gets its own stdout so it cannot hold the pipe
         # open and mask a failure to kill it.
         return [
@@ -314,8 +736,8 @@ class TestCloseWhileTheGeneratorIsSuspended:
     ) -> None:
         marker = tmp_path / "pids"
         processes = DownloadProcesses()
-        stream = _run_piped_process(
-            self._forever_with_grandchild(marker), name="fake", processes=processes
+        stream = _stream_through_ffmpeg(
+            [self._forever_with_grandchild(marker)], _passthrough, processes=processes
         )
 
         assert next(stream)  # the pipeline is live and streaming
@@ -347,8 +769,8 @@ class TestCloseWhileTheGeneratorIsSuspended:
         # and may belong to someone else, so nothing may be signalled.
         marker = tmp_path / "pids"
         processes = DownloadProcesses()
-        stream = _run_piped_process(
-            self._forever_with_grandchild(marker), name="fake", processes=processes
+        stream = _stream_through_ffmpeg(
+            [self._forever_with_grandchild(marker)], _passthrough, processes=processes
         )
 
         assert next(stream)
@@ -379,7 +801,9 @@ class TestDrainerThatCannotStart:
             started.append(process.pid)
             raise RuntimeError("can't start new thread")
 
-        stream = _run_piped_process(cmd, name="fake", processes=DownloadProcesses())
+        stream = _stream_through_ffmpeg(
+            [cmd], _passthrough, processes=DownloadProcesses()
+        )
 
         with (
             patch("app.services.youtube._start_stderr_drainer", explode),

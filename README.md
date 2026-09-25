@@ -11,7 +11,8 @@ ever writing the video to disk.
 - **Stateless backend.** No database, no sessions, no per-user state.
 - **Single-container deployment.** `nginx` serves the static frontend and
   reverse-proxies the API to `uvicorn` in one image.
-- **MP4 video and MP3 audio.** Quality selection up to the best available.
+- **MP4 video and MP3 audio.** Quality selection up to 1080p or higher, with
+  the most widely supported codecs preferred.
 - **Playlist support.** Browse playlist entries and download videos one by
   one.
 - **Reproducible builds.** Backend dependencies are pinned in
@@ -48,8 +49,9 @@ Browser
 ```
 
 The download endpoint returns a `StreamingResponse` whose body is the live
-output of `yt-dlp`'s subprocess (and `ffmpeg` for MP3). Nginx is configured
-with `proxy_buffering off` so the bytes flow straight through to the client.
+output of `yt-dlp` subprocesses piped through `ffmpeg`, which converts to MP3
+or merges video and audio into fragmented MP4. Nginx is configured with
+`proxy_buffering off` so the bytes flow straight through to the client.
 
 ## Quick start (Docker)
 
@@ -180,6 +182,19 @@ URL, returns `PlaylistInfo`.
 
 Streams the media as `video/mp4` or `audio/mpeg` with `Content-Disposition:
 attachment`.
+
+For `fmt=mp4`, H.264 video and AAC audio are preferred over AV1 and VP9,
+because far more hardware decoders support them, such as car head units and
+older TVs. YouTube rarely offers H.264 above 1080p, so `quality=best` usually
+tops out at 1080p. The fixed qualities are ceilings: when a video offers
+H.264 only below the requested height, that lower H.264 is chosen over a
+taller AV1 or VP9 rendition. When no H.264 rendition fits the ceiling, the
+best other codec within it is chosen.
+
+The mp4 is fragmented MP4, the only MP4 layout that can be streamed
+without first storing the whole file. H.264/AAC downloads were checked to
+open and play in QuickTime Player; files that fall back to another codec
+were not.
 
 ### `GET /api/health`
 

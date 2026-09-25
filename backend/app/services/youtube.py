@@ -10,7 +10,7 @@ import signal
 import subprocess
 import threading
 from collections import deque
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from typing import IO, Any, NoReturn
 from urllib.parse import urlsplit, urlunsplit
@@ -86,6 +86,22 @@ UNSUPPORTED_URL_MARKERS = ("no suitable extractor", "unsupported url")
 # (youtube:clip) were rejected outright. "youtube.*" covers all twenty
 # and still excludes generic, which is the one that leaves YouTube.
 ALLOWED_EXTRACTORS = ("youtube.*",)
+# The [ext=mp4] filters in _resolve_video_format constrain the container,
+# not the codec, and YouTube serves AV1 in mp4. yt-dlp's default sort
+# ranks AV1 first, so without this every tier picked AV1 whenever a video
+# had it. Far fewer hardware decoders handle AV1 than H.264: a car head
+# unit that plays H.264 MP4 failed on these downloads (#112). This is the
+# sort from yt-dlp's own "-t mp4" preset: prefer H.264 and AAC, fall back
+# to other codecs only when no H.264 rendition fits the requested height
+# ceiling (the [height<=N] filter applies before this sort). YouTube rarely
+# offers H.264 above 1080p, so "best" usually tops out there; that trade
+# was chosen for compatibility.
+VIDEO_FORMAT_SORT = "vcodec:h264,lang,quality,res,fps,hdr:12,acodec:aac"
+# The audio half of an mp4 download. Selected by its own yt-dlp process,
+# so it cannot share the video's height ceiling -- and does not need one.
+# The progressive fallback only matters for videos with no separate audio
+# format; ffmpeg then takes just its audio track.
+AUDIO_TRACK_FORMAT = "bestaudio[ext=m4a]/best"
 
 
 class YouTubeError(Exception):
@@ -365,10 +381,10 @@ def stream_download(
 ) -> Generator[bytes]:
     """Stream a video download as chunks without writing to disk.
 
-    Uses yt-dlp subprocess to pipe output directly to the caller,
-    ensuring zero disk I/O on the server. For MP3, pipes yt-dlp
-    through ffmpeg for format conversion since yt-dlp skips
-    post-processors in stdout mode.
+    Pipes a yt-dlp subprocess through an ffmpeg stage of our own
+    straight to the caller, ensuring zero disk I/O on the server. yt-dlp
+    skips post-processors in stdout mode and cannot write MP4 there, so
+    ffmpeg converts to MP3 or remuxes to fragmented MP4.
 
     Args:
         url: YouTube video URL.
@@ -401,8 +417,23 @@ def stream_download(
 def _stream_video(
     url: str, quality: str, processes: DownloadProcesses
 ) -> Generator[bytes]:
-    cmd = _build_video_command(url, quality)
-    yield from _run_piped_process(cmd, processes=processes)
+    """Stream MP4 by merging separately downloaded video and audio.
+
+    Each track is fetched by its own yt-dlp process and merged by our own
+    ffmpeg, rather than letting one yt-dlp merge them. yt-dlp merges
+    through FFmpegFD, which hands ffmpeg each URL for a single unchunked
+    request; YouTube throttles those (a 14 MB video took 109 s instead of
+    3.6 s) and the audio came out truncated (#115). Downloaded on their
+    own, both tracks use yt-dlp's chunked HTTP downloader. It also sidesteps
+    yt-dlp muxing MP4 to stdout, which it forces to MPEG-TS -- not the
+    video/mp4 the response declares, and a container in which AV1 loses
+    its codec identification (#108, #112).
+    """
+    yield from _stream_through_ffmpeg(
+        _build_video_commands(url, quality),
+        _fragmented_mp4_command,
+        processes=processes,
+    )
 
 
 def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
@@ -411,11 +442,17 @@ def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
     yt-dlp skips post-processors in stdout mode, so we pipe the raw
     audio stream through ffmpeg to convert to MP3.
     """
-    ytdlp_cmd = _build_audio_command(url)
-    ffmpeg_cmd = [
+    yield from _stream_through_ffmpeg(
+        [_build_audio_command(url)], _mp3_command, processes=processes
+    )
+
+
+def _mp3_command(inputs: Sequence[str]) -> list[str]:
+    return [
         "ffmpeg",
+        "-nostdin",
         "-i",
-        "pipe:0",
+        inputs[0],
         # bestaudio/best can resolve to a progressive stream that still
         # carries video, which the mp3 muxer cannot take.
         "-vn",
@@ -428,25 +465,87 @@ def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
         "pipe:1",
     ]
 
-    ytdlp_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+
+def _fragmented_mp4_command(inputs: Sequence[str]) -> list[str]:
+    """ffmpeg merging a video input and an audio input into fragmented MP4.
+
+    A regular MP4 cannot be streamed: its moov index is written after the
+    last sample, and moving it to the front means holding the whole file,
+    on disk (forbidden here) or in memory (gigabytes). Fragmented MP4 puts
+    an empty moov first and indexes each fragment as it goes, so it needs
+    neither. default_base_moof is what MSE and CMAF players expect.
+    """
+    video, audio = inputs
+    return [
+        "ffmpeg",
+        "-nostdin",
+        # Without this, input ffmpeg cannot read from a pipe is logged and
+        # then ignored: a progressive MP4 with its moov at the end (which the
+        # single-format fallback could fetch) came out as a 1.3 KB file with
+        # no samples, exit 0, and was served as a successful download. With
+        # it the stage exits non-zero and the stream fails instead.
+        "-xerror",
+        "-i",
+        video,
+        "-i",
+        audio,
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c",
+        "copy",
+        "-f",
+        "mp4",
+        "-movflags",
+        "+frag_keyframe+empty_moov+default_base_moof",
+        "-v",
+        "error",
+        "pipe:1",
+    ]
+
+
+def _stream_through_ffmpeg(
+    ytdlp_cmds: Sequence[list[str]],
+    build_ffmpeg_cmd: Callable[[Sequence[str]], list[str]],
+    *,
+    processes: DownloadProcesses,
+) -> Generator[bytes]:
+    """Stream the output of yt-dlp processes through an ffmpeg stage.
+
+    Each yt-dlp writes to its own pipe, and ``build_ffmpeg_cmd`` gets one
+    ffmpeg input per command, in order (``pipe:<fd>``); the command it
+    returns must write ``pipe:1``. Every process is registered with
+    ``processes`` so a disconnect can tear the pipeline down from outside
+    the generator.
+    """
+    sources: list[
+        tuple[subprocess.Popen[bytes], deque[str], threading.Thread | None]
+    ] = []
     ffmpeg_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
     try:
         try:
-            ytdlp_proc = subprocess.Popen(
-                ytdlp_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-            )
-            # Registered before ffmpeg starts: if ffmpeg turns out to be
-            # missing, this is the only handle that can still reach yt-dlp.
-            ytdlp_drainer = processes.register("yt-dlp", ytdlp_proc, ytdlp_tail)
+            for ytdlp_cmd in ytdlp_cmds:
+                ytdlp_proc = subprocess.Popen(
+                    ytdlp_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+                # Registered before ffmpeg starts: if ffmpeg turns out to
+                # be missing, this is the only handle that can still reach
+                # yt-dlp.
+                drainer = processes.register("yt-dlp", ytdlp_proc, tail)
+                sources.append((ytdlp_proc, tail, drainer))
 
+            input_fds = [_stdout_fd(proc) for proc, _, _ in sources]
             ffmpeg_proc = subprocess.Popen(
-                ffmpeg_cmd,
-                stdin=ytdlp_proc.stdout,
+                build_ffmpeg_cmd([f"pipe:{fd}" for fd in input_fds]),
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                pass_fds=input_fds,
                 start_new_session=True,
             )
             ffmpeg_drainer = processes.register("ffmpeg", ffmpeg_proc, ffmpeg_tail)
@@ -455,36 +554,53 @@ def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
                 "yt-dlp or ffmpeg is not installed or not in PATH."
             ) from e
 
-        # Close our handle on ytdlp's stdout so ffmpeg owns it; ytdlp will
-        # receive SIGPIPE if ffmpeg exits early.
-        if ytdlp_proc.stdout:
-            ytdlp_proc.stdout.close()
+        # Close our handles on the yt-dlp pipes so ffmpeg owns them; a
+        # yt-dlp receives SIGPIPE if ffmpeg exits early.
+        for proc, _, _ in sources:
+            if proc.stdout:
+                proc.stdout.close()
 
         if ffmpeg_proc.stdout is None:
             raise YouTubeError("Failed to open ffmpeg stdout pipe.")
+        # One chunk is held back until the exit statuses are known. The
+        # router sends the 200 as soon as the first chunk arrives, so a
+        # stage that fails after writing only a header -- ffmpeg emits
+        # about 1.3 KB of ftyp/moov before it discovers an unreadable
+        # input -- used to reach the client as an aborted video/mp4.
+        # Held back, a failure within the first chunk surfaces before the
+        # headers and becomes an error response instead.
+        held = b""
         while True:
             chunk = ffmpeg_proc.stdout.read(CHUNK_SIZE)
             if not chunk:
                 break
-            yield chunk
+            if held:
+                yield held
+            held = chunk
 
-        # Same ordering as the single-process path: reach each group
-        # while its leader still holds its pid.
-        for proc in (ytdlp_proc, ffmpeg_proc):
+        # A non-zero exit below means the download failed; without the
+        # checks the generator would end normally and the caller would
+        # serve a successful-looking but truncated response.
+        #
+        # Clean each group up before reaping it: anything a process
+        # spawned is only reachable while its pid is still held, and once
+        # the pid is released there is no safe way to reach it.
+        for proc in (*(proc for proc, _, _ in sources), ffmpeg_proc):
             _await_exit_without_reaping(proc)
             _kill_process_group(proc)
 
         # yt-dlp is checked first: when it fails, ffmpeg's own non-zero
         # exit is only a consequence of receiving a truncated stream,
         # and yt-dlp's stderr carries the reason worth reporting.
-        if ytdlp_proc.wait() != 0:
-            _raise_from_subprocess_failure(
-                "yt-dlp", ytdlp_proc.returncode, ytdlp_tail, ytdlp_drainer
-            )
+        for proc, tail, drainer in sources:
+            if proc.wait() != 0:
+                _raise_from_subprocess_failure("yt-dlp", proc.returncode, tail, drainer)
         if ffmpeg_proc.wait() != 0:
             _raise_from_subprocess_failure(
                 "ffmpeg", ffmpeg_proc.returncode, ffmpeg_tail, ffmpeg_drainer
             )
+        if held:
+            yield held
     finally:
         # Reverse registration order, so the pipeline comes down from
         # its consumer end -- the order this block used before teardown
@@ -492,51 +608,10 @@ def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
         processes.close()
 
 
-def _run_piped_process(
-    cmd: list[str],
-    name: str = "yt-dlp",
-    *,
-    processes: DownloadProcesses,
-) -> Generator[bytes]:
-    stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
-    try:
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                # Own session, so teardown can signal the whole group.
-                start_new_session=True,
-            )
-        except FileNotFoundError as e:
-            raise YouTubeError("yt-dlp is not installed or not in PATH.") from e
-
-        drainer = processes.register(name, process, stderr_tail)
-
-        if process.stdout is None:
-            raise YouTubeError("Failed to open stdout pipe.")
-        while True:
-            chunk = process.stdout.read(CHUNK_SIZE)
-            if not chunk:
-                break
-            yield chunk
-
-        # stdout hit EOF, so the process is on its way out. A non-zero
-        # exit here means the download failed; without this the
-        # generator would end normally and the caller would serve a
-        # successful-looking but empty response.
-        #
-        # Clean the group up before reaping: yt-dlp can exit while the
-        # ffmpeg it started for muxing is still alive, and once the pid
-        # is released there is no safe way to reach that grandchild.
-        _await_exit_without_reaping(process)
-        _kill_process_group(process)
-        if process.wait() != 0:
-            _raise_from_subprocess_failure(
-                name, process.returncode, stderr_tail, drainer
-            )
-    finally:
-        processes.close()
+def _stdout_fd(process: subprocess.Popen[bytes]) -> int:
+    if process.stdout is None:
+        raise YouTubeError("Failed to open yt-dlp stdout pipe.")
+    return process.stdout.fileno()
 
 
 def _drain_stderr(name: str, stream: IO[bytes], tail: deque[str]) -> None:
@@ -658,9 +733,10 @@ def _finalize_process(
 def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
     """SIGKILL the subprocess along with anything it spawned.
 
-    yt-dlp starts ffmpeg itself to mux separate video and audio
-    streams, so killing only the direct child can leave that grandchild
-    holding two HTTPS connections with no socket timeout of its own.
+    yt-dlp starts processes of its own -- deno to solve YouTube's player
+    challenges, ffmpeg whenever it merges formats or fetches a segmented
+    one -- so killing only the direct child can leave a grandchild behind,
+    ffmpeg holding HTTPS connections with no socket timeout of its own.
     Every subprocess here is started with ``start_new_session=True``, so
     its process group id equals its pid.
 
@@ -718,27 +794,25 @@ def build_download_filename(
 # guarantee this service is built around. The /api/info path is unaffected:
 # it drives yt-dlp through the Python API, which never reads those files.
 def _build_audio_command(url: str) -> list[str]:
-    return [
-        "yt-dlp",
-        "--ignore-config",
-        "--use-extractors",
-        ",".join(ALLOWED_EXTRACTORS),
-        "--no-playlist",
-        "-f",
-        "bestaudio/best",
-        "-o",
-        "-",
-        "--quiet",
-        "--no-warnings",
-        "--no-cache-dir",
-        "--socket-timeout",
-        str(SOCKET_TIMEOUT),
-        url,
-    ]
+    return _build_ytdlp_command(url, "bestaudio/best")
 
 
-def _build_video_command(url: str, quality: str) -> list[str]:
-    format_spec = _resolve_video_format(quality)
+def _build_video_commands(url: str, quality: str) -> tuple[list[str], list[str]]:
+    """yt-dlp commands for the video and the audio track, in that order.
+
+    Each selects a single format, so neither yt-dlp merges anything; see
+    _stream_video for why the merge happens in our own ffmpeg instead.
+    """
+    sort = ["-S", VIDEO_FORMAT_SORT]
+    return (
+        _build_ytdlp_command(url, _resolve_video_format(quality), sort),
+        _build_ytdlp_command(url, AUDIO_TRACK_FORMAT, sort),
+    )
+
+
+def _build_ytdlp_command(
+    url: str, format_spec: str, extra: Sequence[str] = ()
+) -> list[str]:
     return [
         "yt-dlp",
         "--ignore-config",
@@ -747,10 +821,9 @@ def _build_video_command(url: str, quality: str) -> list[str]:
         "--no-playlist",
         "-f",
         format_spec,
+        *extra,
         "-o",
         "-",
-        "--merge-output-format",
-        "mp4",
         "--quiet",
         "--no-warnings",
         "--no-cache-dir",
@@ -761,21 +834,20 @@ def _build_video_command(url: str, quality: str) -> list[str]:
 
 
 def _resolve_video_format(quality: str) -> str:
-    """Build the yt-dlp format spec for a requested quality.
+    """Build the yt-dlp format spec for the video track of a quality.
 
     Each height-bounded entry keeps the height ceiling on every fallback
     so that requesting 480p never silently downloads 1080p when the
     requested resolution is unavailable. The "best" tier has no ceiling
-    so it falls all the way back to whatever yt-dlp can produce.
+    so it falls all the way back to whatever yt-dlp can produce. The
+    progressive fallbacks carry audio too; ffmpeg only takes their video.
     """
     best_video = "bestvideo[ext=mp4]"
-    best_audio = "bestaudio[ext=m4a]"
-    best_combined_fallback = "best[ext=mp4]/best"
     quality_map = {
-        "best": f"{best_video}+{best_audio}/{best_combined_fallback}",
-        "1080": f"{best_video}[height<=1080]+{best_audio}/best[height<=1080]",
-        "720": f"{best_video}[height<=720]+{best_audio}/best[height<=720]",
-        "480": f"{best_video}[height<=480]+{best_audio}/best[height<=480]",
+        "best": f"{best_video}/best[ext=mp4]/best",
+        "1080": f"{best_video}[height<=1080]/best[height<=1080]",
+        "720": f"{best_video}[height<=720]/best[height<=720]",
+        "480": f"{best_video}[height<=480]/best[height<=480]",
     }
     return quality_map.get(quality, quality_map["best"])
 
