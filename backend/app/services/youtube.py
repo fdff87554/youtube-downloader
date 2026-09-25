@@ -95,6 +95,25 @@ ALLOWED_EXTRACTORS = ("youtube.*",)
 # video has no H.264 at all. YouTube rarely offers H.264 above 1080p, so
 # "best" usually tops out there; that trade was chosen for compatibility.
 VIDEO_FORMAT_SORT = "vcodec:h264,lang,quality,res,fps,hdr:12,acodec:aac"
+# A regular MP4 cannot be streamed: its moov index is written after the
+# last sample, and moving it to the front means holding the whole file,
+# on disk (forbidden here) or in memory (gigabytes). Fragmented MP4 puts
+# an empty moov first and indexes each fragment as it goes, so it needs
+# neither. default_base_moof is what MSE and CMAF players expect.
+FRAGMENTED_MP4_REMUX_COMMAND = [
+    "ffmpeg",
+    "-i",
+    "pipe:0",
+    "-c",
+    "copy",
+    "-f",
+    "mp4",
+    "-movflags",
+    "+frag_keyframe+empty_moov+default_base_moof",
+    "-v",
+    "error",
+    "pipe:1",
+]
 
 
 class YouTubeError(Exception):
@@ -374,10 +393,10 @@ def stream_download(
 ) -> Generator[bytes]:
     """Stream a video download as chunks without writing to disk.
 
-    Uses yt-dlp subprocess to pipe output directly to the caller,
-    ensuring zero disk I/O on the server. For MP3, pipes yt-dlp
-    through ffmpeg for format conversion since yt-dlp skips
-    post-processors in stdout mode.
+    Pipes a yt-dlp subprocess through an ffmpeg stage of our own
+    straight to the caller, ensuring zero disk I/O on the server. yt-dlp
+    skips post-processors in stdout mode and cannot write MP4 there, so
+    ffmpeg converts to MP3 or remuxes to fragmented MP4.
 
     Args:
         url: YouTube video URL.
@@ -410,8 +429,20 @@ def stream_download(
 def _stream_video(
     url: str, quality: str, processes: DownloadProcesses
 ) -> Generator[bytes]:
-    cmd = _build_video_command(url, quality)
-    yield from _run_piped_process(cmd, processes=processes)
+    """Stream MP4 by remuxing yt-dlp's Matroska output to fragmented MP4.
+
+    yt-dlp cannot produce MP4 on stdout: when it muxes to "-" it forces
+    MPEG-TS (yt_dlp/downloader/external.py, ``ext == 'mp4' and
+    tmpfilename == '-'``), which QuickTime will not open and in which
+    AV1 loses its codec identification. So yt-dlp hands us Matroska,
+    which is streamable and keeps every codec identifiable, and our own
+    ffmpeg copies the streams into MP4 without re-encoding.
+    """
+    yield from _stream_through_ffmpeg(
+        _build_video_command(url, quality),
+        FRAGMENTED_MP4_REMUX_COMMAND,
+        processes=processes,
+    )
 
 
 def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
@@ -776,7 +807,9 @@ def _build_video_command(url: str, quality: str) -> list[str]:
         "-o",
         "-",
         "--merge-output-format",
-        "mp4",
+        # Not mp4: see _stream_video for why the container is converted
+        # by our own ffmpeg stage instead.
+        "mkv",
         "--quiet",
         "--no-warnings",
         "--no-cache-dir",

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
 import sys
@@ -21,13 +22,16 @@ from unittest.mock import patch
 import pytest
 
 from app.services.youtube import (
+    FRAGMENTED_MP4_REMUX_COMMAND,
     DownloadProcesses,
     UnsupportedURLError,
     VideoNotFoundError,
     YouTubeError,
+    _build_video_command,
     _finalize_process,
     _run_piped_process,
     _stream_through_ffmpeg,
+    stream_download,
 )
 
 # Linux-only: the project ships as a Linux container and CI runs on
@@ -225,6 +229,75 @@ class TestStreamThroughFfmpeg:
                     producer, failing_stage, processes=DownloadProcesses()
                 )
             )
+
+
+def _top_level_boxes(data: bytes, count: int) -> list[str]:
+    """Names of the first ``count`` ISO BMFF boxes in ``data``."""
+    names = []
+    offset = 0
+    while len(names) < count and offset + 8 <= len(data):
+        size = int.from_bytes(data[offset : offset + 4], "big")
+        names.append(data[offset + 4 : offset + 8].decode("latin-1"))
+        if size < 8:
+            break
+        offset += size
+    return names
+
+
+# Stands in for yt-dlp: a short Matroska file with video and audio on
+# stdout, which is what --merge-output-format mkv makes yt-dlp emit.
+LAVFI_MATROSKA = [
+    "ffmpeg",
+    "-v",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc=duration=2:size=320x240:rate=25",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=duration=2",
+    "-c:v",
+    "mpeg4",
+    "-c:a",
+    "aac",
+    "-f",
+    "matroska",
+    "pipe:1",
+]
+
+
+class TestVideoIsRemuxedToFragmentedMp4:
+    """fmt=mp4 used to return MPEG-TS under Content-Type video/mp4 (#108).
+
+    yt-dlp forces MPEG-TS whenever it muxes MP4 to stdout, so it now
+    emits Matroska and our own ffmpeg stage remuxes that to MP4.
+    """
+
+    def test_yt_dlp_is_asked_for_matroska(self) -> None:
+        cmd = _build_video_command("https://www.youtube.com/watch?v=test", "best")
+
+        assert cmd[cmd.index("--merge-output-format") + 1] == "mkv"
+
+    def test_video_goes_through_the_remux_stage(self) -> None:
+        with patch(
+            "app.services.youtube._stream_through_ffmpeg", return_value=iter(())
+        ) as pipeline:
+            list(stream_download("https://www.youtube.com/watch?v=test", "mp4"))
+
+        assert pipeline.call_args.args[1] == FRAGMENTED_MP4_REMUX_COMMAND
+
+    @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+    def test_output_is_a_fragmented_mp4(self) -> None:
+        with patch(
+            "app.services.youtube._build_video_command", return_value=LAVFI_MATROSKA
+        ):
+            output = b"".join(
+                stream_download("https://www.youtube.com/watch?v=test", "mp4")
+            )
+
+        assert _top_level_boxes(output, 3) == ["ftyp", "moov", "moof"]
 
 
 class TestFinalizeProcessKillsGrandchildren:

@@ -186,6 +186,9 @@ the file plays on car head units, older TVs and QuickTime. YouTube rarely
 offers H.264 above 1080p, so `quality=best` usually tops out at 1080p. A
 video with no H.264 rendition falls back to the best other codec.
 
+The mp4 is fragmented MP4, the only MP4 layout that can be streamed
+without first storing the whole file.
+
 ### `GET /api/health`
 
 Returns `{"status": "ok"}` when the application is responsive.
