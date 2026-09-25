@@ -27,6 +27,7 @@ from app.services.youtube import (
     YouTubeError,
     _finalize_process,
     _run_piped_process,
+    _stream_through_ffmpeg,
 )
 
 # Linux-only: the project ships as a Linux container and CI runs on
@@ -42,6 +43,22 @@ def _is_alive(pid: int) -> bool:
     except FileNotFoundError:
         return False
     return state != "Z"
+
+
+# Stands in for our ffmpeg stage: copies stdin to stdout as it arrives,
+# so a stream that never ends still reaches the reader.
+PASSTHROUGH = [
+    sys.executable,
+    "-c",
+    "import sys\n"
+    "while chunk := sys.stdin.buffer.read1(65536):\n"
+    "    sys.stdout.buffer.write(chunk)\n"
+    "    sys.stdout.buffer.flush()\n",
+]
+
+
+def _python(source: str) -> list[str]:
+    return [sys.executable, "-c", source]
 
 
 def _wait_until_dead(pid: int, timeout: float = 5.0) -> bool:
@@ -153,6 +170,61 @@ class TestRunPipedProcess:
             )
             == b"ok"
         )
+
+
+class TestStreamThroughFfmpeg:
+    """The two-stage pipeline shared by the mp3 and mp4 paths."""
+
+    def test_yields_the_second_stage_output_in_full(self) -> None:
+        payload_size = 200_000
+        producer = _python(
+            f"import sys; sys.stdout.buffer.write(b'a' * {payload_size})"
+        )
+
+        result = b"".join(
+            _stream_through_ffmpeg(producer, PASSTHROUGH, processes=DownloadProcesses())
+        )
+
+        assert result == b"a" * payload_size
+
+    def test_raises_when_a_binary_is_missing(self) -> None:
+        with pytest.raises(YouTubeError, match="not installed"):
+            list(
+                _stream_through_ffmpeg(
+                    ["/no/such/binary"], PASSTHROUGH, processes=DownloadProcesses()
+                )
+            )
+
+    def test_reports_the_ffmpeg_stage_failing(self) -> None:
+        producer = _python("import sys; sys.stdout.buffer.write(b'data')")
+        failing_stage = _python(
+            "import sys\n"
+            "sys.stdin.buffer.read()\n"
+            "sys.stderr.write('Invalid data found when processing input\\n')\n"
+            "sys.exit(1)\n"
+        )
+
+        with pytest.raises(YouTubeError, match="ffmpeg failed: Invalid data"):
+            list(
+                _stream_through_ffmpeg(
+                    producer, failing_stage, processes=DownloadProcesses()
+                )
+            )
+
+    def test_reports_yt_dlp_when_both_stages_fail(self) -> None:
+        # ffmpeg failing on a truncated input is only a consequence;
+        # the reason worth reporting is on yt-dlp's stderr.
+        producer = _python(
+            "import sys\nsys.stderr.write('ERROR: Video unavailable\\n')\nsys.exit(1)\n"
+        )
+        failing_stage = _python("import sys; sys.stdin.buffer.read(); sys.exit(1)")
+
+        with pytest.raises(VideoNotFoundError, match="Video unavailable"):
+            list(
+                _stream_through_ffmpeg(
+                    producer, failing_stage, processes=DownloadProcesses()
+                )
+            )
 
 
 class TestFinalizeProcessKillsGrandchildren:

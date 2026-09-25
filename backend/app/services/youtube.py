@@ -420,7 +420,6 @@ def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
     yt-dlp skips post-processors in stdout mode, so we pipe the raw
     audio stream through ffmpeg to convert to MP3.
     """
-    ytdlp_cmd = _build_audio_command(url)
     ffmpeg_cmd = [
         "ffmpeg",
         "-i",
@@ -436,7 +435,23 @@ def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
         "quiet",
         "pipe:1",
     ]
+    yield from _stream_through_ffmpeg(
+        _build_audio_command(url), ffmpeg_cmd, processes=processes
+    )
 
+
+def _stream_through_ffmpeg(
+    ytdlp_cmd: list[str],
+    ffmpeg_cmd: list[str],
+    *,
+    processes: DownloadProcesses,
+) -> Generator[bytes]:
+    """Stream yt-dlp's stdout through an ffmpeg stage of our own.
+
+    ``ffmpeg_cmd`` must read ``pipe:0`` and write ``pipe:1``. Both
+    processes are registered with ``processes`` so a disconnect can
+    tear the pipeline down from outside the generator.
+    """
     ytdlp_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
     ffmpeg_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
     try:
