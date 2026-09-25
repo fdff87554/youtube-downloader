@@ -86,6 +86,15 @@ UNSUPPORTED_URL_MARKERS = ("no suitable extractor", "unsupported url")
 # (youtube:clip) were rejected outright. "youtube.*" covers all twenty
 # and still excludes generic, which is the one that leaves YouTube.
 ALLOWED_EXTRACTORS = ("youtube.*",)
+# The [ext=mp4] filters in _resolve_video_format constrain the container,
+# not the codec, and YouTube serves AV1 in mp4. yt-dlp's default sort
+# ranks AV1 first, so without this every tier picked AV1 whenever a video
+# had it -- which car head units, older TVs and QuickTime on Macs without
+# AV1 hardware cannot decode. This is the sort from yt-dlp's own "-t mp4"
+# preset: prefer H.264 and AAC, fall back to other codecs only when a
+# video has no H.264 at all. YouTube rarely offers H.264 above 1080p, so
+# "best" usually tops out there; that trade was chosen for compatibility.
+VIDEO_FORMAT_SORT = "vcodec:h264,lang,quality,res,fps,hdr:12,acodec:aac"
 
 
 class YouTubeError(Exception):
@@ -747,6 +756,8 @@ def _build_video_command(url: str, quality: str) -> list[str]:
         "--no-playlist",
         "-f",
         format_spec,
+        "-S",
+        VIDEO_FORMAT_SORT,
         "-o",
         "-",
         "--merge-output-format",

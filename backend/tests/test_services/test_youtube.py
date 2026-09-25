@@ -586,6 +586,97 @@ class TestResolveVideoFormat:
         assert _resolve_video_format("garbage") == _resolve_video_format("best")
 
 
+def _video_format(format_id: str, vcodec: str, height: int, tbr: int) -> dict:
+    return {
+        "format_id": format_id,
+        "url": f"https://example.invalid/{format_id}",
+        "protocol": "https",
+        "ext": "mp4",
+        "vcodec": vcodec,
+        "acodec": "none",
+        "height": height,
+        "width": height * 16 // 9,
+        "tbr": tbr,
+    }
+
+
+AAC_AUDIO = {
+    "format_id": "140",
+    "url": "https://example.invalid/140",
+    "protocol": "https",
+    "ext": "m4a",
+    "vcodec": "none",
+    "acodec": "mp4a.40.2",
+    "abr": 128,
+    "tbr": 128,
+}
+AV1_1440 = _video_format("av1-1440", "av01.0.12M.08", 1440, 5000)
+AV1_1080 = _video_format("av1-1080", "av01.0.08M.08", 1080, 3000)
+H264_1080 = _video_format("h264-1080", "avc1.640028", 1080, 4000)
+AV1_480 = _video_format("av1-480", "av01.0.04M.08", 480, 800)
+H264_480 = _video_format("h264-480", "avc1.4d401e", 480, 1000)
+
+
+def _select_video_format(quality: str, formats: list[dict]) -> str:
+    """Run yt-dlp's real format selection with the video command's -f and -S.
+
+    Reading both values out of the command, rather than off the
+    constants, is what ties this to the argv yt-dlp actually receives.
+    """
+    import yt_dlp
+
+    cmd = _build_video_command("https://www.youtube.com/watch?v=test", quality)
+    opts = {
+        "quiet": True,
+        "simulate": True,
+        "format": cmd[cmd.index("-f") + 1],
+        "format_sort": cmd[cmd.index("-S") + 1].split(","),
+    }
+    info = {
+        "id": "test",
+        "title": "test",
+        "extractor": "youtube",
+        "extractor_key": "Youtube",
+        "webpage_url": "https://www.youtube.com/watch?v=test",
+        "formats": [dict(f) for f in formats],
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.process_ie_result(info, download=False)["format_id"]
+
+
+class TestVideoCodecPreference:
+    """fmt=mp4 has to pick H.264 over AV1, which many players cannot decode.
+
+    [ext=mp4] only constrains the container, and YouTube serves AV1 in
+    mp4, so before the sort was added every tier picked AV1 whenever a
+    video offered it (#112).
+    """
+
+    @pytest.mark.parametrize("quality", ["best", "1080"])
+    def test_h264_is_chosen_over_av1(self, quality: str) -> None:
+        formats = [AV1_1440, AV1_1080, H264_1080, H264_480, AAC_AUDIO]
+
+        selected = _select_video_format(quality, formats)
+
+        assert selected == "h264-1080+140"
+
+    def test_bounded_tier_prefers_h264_within_its_height_ceiling(self) -> None:
+        formats = [AV1_1440, AV1_1080, H264_1080, AV1_480, H264_480, AAC_AUDIO]
+
+        selected = _select_video_format("480", formats)
+
+        assert selected == "h264-480+140"
+
+    def test_av1_is_still_served_when_there_is_no_h264(self) -> None:
+        # A preference, not a filter: a video without H.264 must still
+        # download rather than fail with "format not available".
+        formats = [AV1_1440, AV1_1080, AAC_AUDIO]
+
+        selected = _select_video_format("1080", formats)
+
+        assert selected == "av1-1080+140"
+
+
 class TestKillProcessGroup:
     """Guards on the one call that can take out unrelated processes.
 
