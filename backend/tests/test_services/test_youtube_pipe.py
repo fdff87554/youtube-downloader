@@ -10,6 +10,7 @@ binary-missing failure modes.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import pathlib
 import re
@@ -27,7 +28,9 @@ from app.services.youtube import (
     UnsupportedURLError,
     VideoNotFoundError,
     YouTubeError,
+    _build_info_command,
     _build_video_commands,
+    _extract_info_json,
     _finalize_process,
     _fragmented_mp4_command,
     _stream_through_ffmpeg,
@@ -289,10 +292,34 @@ needs_ffmpeg = pytest.mark.skipif(
 )
 
 
+# Stands in for the one yt-dlp that resolves the video: prints an info JSON.
+INFO_STUB = _python("print('{}')")
+
+
+def _video_sources(video: list[str], audio: list[str]):
+    """Patch the mp4 path's commands: a stub resolution, then two tracks."""
+    return _patch_many(
+        patch("app.services.youtube._build_info_command", return_value=INFO_STUB),
+        patch(
+            "app.services.youtube._build_video_commands",
+            return_value=(video, audio),
+        ),
+    )
+
+
+@contextlib.contextmanager
+def _patch_many(*patchers):
+    with contextlib.ExitStack() as stack:
+        for patcher in patchers:
+            stack.enter_context(patcher)
+        yield
+
+
 def _lavfi(source: str, codec: list[str]) -> list[str]:
     """Stands in for one yt-dlp: a two-second single-track stream."""
     return [
         "ffmpeg",
+        "-nostdin",
         "-v",
         "error",
         "-f",
@@ -363,28 +390,26 @@ class TestVideoIsMergedByOurOwnFfmpeg:
 
     @pytest.mark.parametrize("quality", ["best", "1080", "720", "480"])
     def test_each_yt_dlp_fetches_a_single_format(self, quality: str) -> None:
-        commands = _build_video_commands(
-            "https://www.youtube.com/watch?v=test", quality
-        )
+        commands = _build_video_commands(quality)
 
         for cmd in commands:
             assert "+" not in cmd[cmd.index("-f") + 1]
             assert "--merge-output-format" not in cmd
 
     def test_video_goes_through_the_remux_stage(self) -> None:
-        with patch(
-            "app.services.youtube._stream_through_ffmpeg", return_value=iter(())
-        ) as pipeline:
+        with (
+            patch("app.services.youtube._extract_info_json", return_value=b"{}"),
+            patch(
+                "app.services.youtube._stream_through_ffmpeg", return_value=iter(())
+            ) as pipeline,
+        ):
             list(stream_download("https://www.youtube.com/watch?v=test", "mp4"))
 
         assert pipeline.call_args.args[1] is _fragmented_mp4_command
 
     @needs_ffmpeg
     def test_output_is_a_fragmented_mp4(self) -> None:
-        with patch(
-            "app.services.youtube._build_video_commands",
-            return_value=(LAVFI_VIDEO, LAVFI_AUDIO),
-        ):
+        with _video_sources(LAVFI_VIDEO, LAVFI_AUDIO):
             output = b"".join(
                 stream_download("https://www.youtube.com/watch?v=test", "mp4")
             )
@@ -395,10 +420,7 @@ class TestVideoIsMergedByOurOwnFfmpeg:
     def test_output_carries_the_video_of_one_and_the_audio_of_the_other(
         self,
     ) -> None:
-        with patch(
-            "app.services.youtube._build_video_commands",
-            return_value=(LAVFI_VIDEO, LAVFI_AUDIO),
-        ):
+        with _video_sources(LAVFI_VIDEO, LAVFI_AUDIO):
             output = b"".join(
                 stream_download("https://www.youtube.com/watch?v=test", "mp4")
             )
@@ -410,10 +432,7 @@ class TestVideoIsMergedByOurOwnFfmpeg:
         # Guards our own pipeline cutting the audio short, the symptom of
         # #115. It cannot reproduce #115's cause: YouTube throttling an
         # unchunked request only happens against YouTube.
-        with patch(
-            "app.services.youtube._build_video_commands",
-            return_value=(LAVFI_VIDEO, LAVFI_AUDIO),
-        ):
+        with _video_sources(LAVFI_VIDEO, LAVFI_AUDIO):
             output = b"".join(
                 stream_download("https://www.youtube.com/watch?v=test", "mp4")
             )
@@ -421,6 +440,79 @@ class TestVideoIsMergedByOurOwnFfmpeg:
         assert _audio_seconds(output) == pytest.approx(
             LAVFI_AUDIO_SECONDS, abs=AUDIO_LENGTH_TOLERANCE
         )
+
+
+class TestVideoIsResolvedOnce:
+    """One resolution per download, shared by both track downloads.
+
+    Each resolution runs deno for YouTube's player challenge (about 270
+    MiB at peak). Resolving per track pushed one 1080p download to 680
+    MiB in production, so the tracks read the info JSON instead.
+    """
+
+    URL = "https://www.youtube.com/watch?v=test"
+
+    def test_only_the_info_command_carries_the_url(self) -> None:
+        info = _build_info_command(self.URL)
+        tracks = _build_video_commands("1080")
+
+        assert "-J" in info and self.URL in info
+        for cmd in tracks:
+            assert self.URL not in cmd
+            assert cmd[cmd.index("--load-info-json") + 1] == "-"
+
+    def test_the_info_json_reaches_every_track_download(self) -> None:
+        echo_stdin = _python(
+            "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"
+        )
+
+        result = b"".join(
+            _stream_through_ffmpeg(
+                [echo_stdin, echo_stdin],
+                _passthrough,
+                processes=DownloadProcesses(),
+                stdin_payload=b"{info}",
+            )
+        )
+
+        assert result == b"{info}{info}"
+
+    def test_a_failed_resolution_raises_before_any_track_starts(self) -> None:
+        unavailable = _python(
+            "import sys\nsys.stderr.write('ERROR: Video unavailable\\n')\nsys.exit(1)\n"
+        )
+
+        with (
+            patch("app.services.youtube._build_info_command", return_value=unavailable),
+            patch("app.services.youtube._stream_through_ffmpeg") as pipeline,
+            pytest.raises(VideoNotFoundError, match="Video unavailable"),
+        ):
+            next(stream_download(self.URL, "mp4"))
+
+        pipeline.assert_not_called()
+
+    def test_the_resolver_process_group_is_cleaned_up(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        # deno runs as a child of the resolving yt-dlp; it must not
+        # outlive the resolution.
+        marker = tmp_path / "grandchild.pid"
+        resolver = _python(
+            "import subprocess, sys, pathlib\n"
+            "child = subprocess.Popen(\n"
+            "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+            "    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            f"pathlib.Path({str(marker)!r}).write_text(str(child.pid))\n"
+            "print('{}')\n"
+        )
+
+        info = _extract_info_json(resolver, processes=DownloadProcesses())
+
+        grandchild = int(marker.read_text())
+        assert info.strip() == b"{}"
+        if not _wait_until_dead(grandchild):
+            os.kill(grandchild, signal.SIGKILL)
+            pytest.fail(f"resolver's child {grandchild} outlived the resolution")
 
 
 def _progressive_mp4(path: pathlib.Path, *, moov_first: bool) -> pathlib.Path:
@@ -473,10 +565,7 @@ class TestProgressiveFallbackThroughTheRemux:
     def test_moov_first_is_remuxed(self, tmp_path: pathlib.Path) -> None:
         source = _progressive_mp4(tmp_path / "head.mp4", moov_first=True)
 
-        with patch(
-            "app.services.youtube._build_video_commands",
-            return_value=(_cat(source), _cat(source)),
-        ):
+        with _video_sources(_cat(source), _cat(source)):
             output = b"".join(
                 stream_download("https://www.youtube.com/watch?v=test", "mp4")
             )
@@ -489,10 +578,7 @@ class TestProgressiveFallbackThroughTheRemux:
         source = _progressive_mp4(tmp_path / "tail.mp4", moov_first=False)
 
         with (
-            patch(
-                "app.services.youtube._build_video_commands",
-                return_value=(_cat(source), _cat(source)),
-            ),
+            _video_sources(_cat(source), _cat(source)),
             pytest.raises(YouTubeError, match="ffmpeg failed"),
         ):
             b"".join(stream_download("https://www.youtube.com/watch?v=test", "mp4"))
@@ -541,10 +627,7 @@ class TestUnreadableInputOverHttp:
     ) -> None:
         source = _progressive_mp4(tmp_path / "tail.mp4", moov_first=False)
 
-        with patch(
-            "app.services.youtube._build_video_commands",
-            return_value=(_cat(source), _cat(source)),
-        ):
+        with _video_sources(_cat(source), _cat(source)):
             response = client.get(
                 "/api/download",
                 params={"url": "https://www.youtube.com/watch?v=test", "fmt": "mp4"},
@@ -559,10 +642,7 @@ class TestUnreadableInputOverHttp:
     ) -> None:
         source = _progressive_mp4(tmp_path / "head.mp4", moov_first=True)
 
-        with patch(
-            "app.services.youtube._build_video_commands",
-            return_value=(_cat(source), _cat(source)),
-        ):
+        with _video_sources(_cat(source), _cat(source)):
             response = client.get(
                 "/api/download",
                 params={"url": "https://www.youtube.com/watch?v=test", "fmt": "mp4"},
@@ -818,3 +898,53 @@ class TestDrainerThatCannotStart:
         finally:
             if _is_alive(pid):
                 os.kill(pid, signal.SIGKILL)
+
+    def _explode_after_recording(self, started: list[int]):
+        def explode(name: str, process: subprocess.Popen[bytes], tail: object) -> None:
+            started.append(process.pid)
+            raise RuntimeError("can't start new thread")
+
+        return explode
+
+    def _assert_killed(self, started: list[int]) -> None:
+        assert started, "the drainer was never reached"
+        pid = started[0]
+        try:
+            assert _wait_until_dead(pid), f"subprocess {pid} was left running"
+        finally:
+            if _is_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+
+    def test_resolver_is_killed_when_its_drainer_cannot_start(self) -> None:
+        # No response exists yet when the resolution fails, so the
+        # router's background close never runs; the resolver has to clean
+        # up after itself.
+        cmd = [sys.executable, "-c", "import time; time.sleep(60)"]
+        started: list[int] = []
+
+        with (
+            patch(
+                "app.services.youtube._start_stderr_drainer",
+                self._explode_after_recording(started),
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            _extract_info_json(cmd, processes=DownloadProcesses())
+
+        self._assert_killed(started)
+
+    def test_mp4_download_leaves_no_resolver_behind(self) -> None:
+        cmd = [sys.executable, "-c", "import time; time.sleep(60)"]
+        started: list[int] = []
+
+        with (
+            patch("app.services.youtube._build_info_command", return_value=cmd),
+            patch(
+                "app.services.youtube._start_stderr_drainer",
+                self._explode_after_recording(started),
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            next(stream_download("https://www.youtube.com/watch?v=test", "mp4"))
+
+        self._assert_killed(started)

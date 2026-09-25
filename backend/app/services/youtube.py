@@ -428,12 +428,55 @@ def _stream_video(
     yt-dlp muxing MP4 to stdout, which it forces to MPEG-TS -- not the
     video/mp4 the response declares, and a container in which AV1 loses
     its codec identification (#108, #112).
+
+    The video is resolved once and both downloads are fed the result. Each
+    resolution runs deno to solve YouTube's player challenge, about 270 MiB
+    at peak; resolving per track doubled that and pushed one 1080p download
+    to 680 MiB in production. With --load-info-json the downloads skip
+    extraction entirely.
     """
+    info_json = _extract_info_json(_build_info_command(url), processes=processes)
     yield from _stream_through_ffmpeg(
-        _build_video_commands(url, quality),
+        _build_video_commands(quality),
         _fragmented_mp4_command,
         processes=processes,
+        stdin_payload=info_json,
     )
+
+
+def _extract_info_json(cmd: list[str], *, processes: DownloadProcesses) -> bytes:
+    """Run a yt-dlp ``-J`` command and return the info JSON it prints.
+
+    The process is registered with ``processes`` like every other, and a
+    non-zero exit is classified the same way, so an unavailable video
+    still becomes a 404 before any response header is sent.
+    """
+    tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except FileNotFoundError as e:
+        raise YouTubeError("yt-dlp is not installed or not in PATH.") from e
+    try:
+        drainer = processes.register("yt-dlp", process, tail)
+        info_json = _stdout_of(process).read()
+        # Same ordering as the pipeline: clean the group up (deno runs in
+        # it) while the pid is still held, then reap.
+        _await_exit_without_reaping(process)
+        _kill_process_group(process)
+        if process.wait() != 0:
+            _raise_from_subprocess_failure("yt-dlp", process.returncode, tail, drainer)
+        return info_json
+    finally:
+        # Nothing else can reach this process if we fail here: the router
+        # only attaches processes.close to a response, and a failure now
+        # means no response is ever built. After a clean exit the process
+        # is already reaped, so this only drops it from the registry.
+        processes.close()
 
 
 def _stream_mp3(url: str, processes: DownloadProcesses) -> Generator[bytes]:
@@ -510,6 +553,7 @@ def _stream_through_ffmpeg(
     build_ffmpeg_cmd: Callable[[Sequence[str]], list[str]],
     *,
     processes: DownloadProcesses,
+    stdin_payload: bytes | None = None,
 ) -> Generator[bytes]:
     """Stream the output of yt-dlp processes through an ffmpeg stage.
 
@@ -517,7 +561,8 @@ def _stream_through_ffmpeg(
     ffmpeg input per command, in order (``pipe:<fd>``); the command it
     returns must write ``pipe:1``. Every process is registered with
     ``processes`` so a disconnect can tear the pipeline down from outside
-    the generator.
+    the generator. ``stdin_payload``, when given, is written to each
+    yt-dlp's stdin (the info JSON for ``--load-info-json -``).
     """
     sources: list[
         tuple[subprocess.Popen[bytes], deque[str], threading.Thread | None]
@@ -528,6 +573,9 @@ def _stream_through_ffmpeg(
             for ytdlp_cmd in ytdlp_cmds:
                 ytdlp_proc = subprocess.Popen(
                     ytdlp_cmd,
+                    stdin=subprocess.DEVNULL
+                    if stdin_payload is None
+                    else subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     start_new_session=True,
@@ -538,8 +586,10 @@ def _stream_through_ffmpeg(
                 # yt-dlp.
                 drainer = processes.register("yt-dlp", ytdlp_proc, tail)
                 sources.append((ytdlp_proc, tail, drainer))
+                if stdin_payload is not None:
+                    _feed_stdin(ytdlp_proc, stdin_payload)
 
-            input_fds = [_stdout_fd(proc) for proc, _, _ in sources]
+            input_fds = [_stdout_of(proc).fileno() for proc, _, _ in sources]
             ffmpeg_proc = subprocess.Popen(
                 build_ffmpeg_cmd([f"pipe:{fd}" for fd in input_fds]),
                 stdin=subprocess.DEVNULL,
@@ -608,10 +658,26 @@ def _stream_through_ffmpeg(
         processes.close()
 
 
-def _stdout_fd(process: subprocess.Popen[bytes]) -> int:
+def _stdout_of(process: subprocess.Popen[bytes]) -> IO[bytes]:
     if process.stdout is None:
         raise YouTubeError("Failed to open yt-dlp stdout pipe.")
-    return process.stdout.fileno()
+    return process.stdout
+
+
+def _feed_stdin(process: subprocess.Popen[bytes], payload: bytes) -> None:
+    """Write ``payload`` to the process's stdin and close it.
+
+    Written in full before anything is read from stdout: yt-dlp's
+    --load-info-json reads all of its input before it writes a byte, so
+    the pipe drains as it fills. A process that dies first raises
+    BrokenPipeError, which is left to its exit status to report.
+    """
+    if process.stdin is None:
+        return
+    with contextlib.suppress(BrokenPipeError):
+        process.stdin.write(payload)
+    with contextlib.suppress(BrokenPipeError):
+        process.stdin.close()
 
 
 def _drain_stderr(name: str, stream: IO[bytes], tail: deque[str]) -> None:
@@ -794,43 +860,55 @@ def build_download_filename(
 # guarantee this service is built around. The /api/info path is unaffected:
 # it drives yt-dlp through the Python API, which never reads those files.
 def _build_audio_command(url: str) -> list[str]:
-    return _build_ytdlp_command(url, "bestaudio/best")
+    return _build_ytdlp_command([url], "bestaudio/best")
 
 
-def _build_video_commands(url: str, quality: str) -> tuple[list[str], list[str]]:
+def _build_info_command(url: str) -> list[str]:
+    """yt-dlp command that resolves a video once and prints its info JSON."""
+    return [*_YTDLP_BASE_ARGS, "-J", url]
+
+
+def _build_video_commands(quality: str) -> tuple[list[str], list[str]]:
     """yt-dlp commands for the video and the audio track, in that order.
 
-    Each selects a single format, so neither yt-dlp merges anything; see
-    _stream_video for why the merge happens in our own ffmpeg instead.
+    Both read the info JSON from stdin (--load-info-json -) instead of
+    resolving the video again; see _stream_video. Each selects a single
+    format, so neither yt-dlp merges anything.
     """
+    from_info = ["--load-info-json", "-"]
     sort = ["-S", VIDEO_FORMAT_SORT]
     return (
-        _build_ytdlp_command(url, _resolve_video_format(quality), sort),
-        _build_ytdlp_command(url, AUDIO_TRACK_FORMAT, sort),
+        _build_ytdlp_command(from_info, _resolve_video_format(quality), sort),
+        _build_ytdlp_command(from_info, AUDIO_TRACK_FORMAT, sort),
     )
 
 
+# --use-extractors still matters with --load-info-json: when a stored
+# format fails to download, yt-dlp re-extracts from the info's
+# webpage_url, and that must stay on YouTube's extractors too.
+_YTDLP_BASE_ARGS = (
+    "yt-dlp",
+    "--ignore-config",
+    "--use-extractors",
+    ",".join(ALLOWED_EXTRACTORS),
+    "--no-playlist",
+    "--quiet",
+    "--no-warnings",
+    "--no-cache-dir",
+    "--socket-timeout",
+    str(SOCKET_TIMEOUT),
+)
+
+
 def _build_ytdlp_command(
-    url: str, format_spec: str, extra: Sequence[str] = ()
+    source: Sequence[str], format_spec: str, extra: Sequence[str] = ()
 ) -> list[str]:
-    return [
-        "yt-dlp",
-        "--ignore-config",
-        "--use-extractors",
-        ",".join(ALLOWED_EXTRACTORS),
-        "--no-playlist",
-        "-f",
-        format_spec,
-        *extra,
-        "-o",
-        "-",
-        "--quiet",
-        "--no-warnings",
-        "--no-cache-dir",
-        "--socket-timeout",
-        str(SOCKET_TIMEOUT),
-        url,
-    ]
+    """yt-dlp command streaming one format of ``source`` to stdout.
+
+    ``source`` is either the URL alone or the arguments that read an info
+    JSON instead (``--load-info-json -``).
+    """
+    return [*_YTDLP_BASE_ARGS, "-f", format_spec, *extra, "-o", "-", *source]
 
 
 def _resolve_video_format(quality: str) -> str:
