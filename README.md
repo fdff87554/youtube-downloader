@@ -49,8 +49,8 @@ Browser
 ```
 
 The download endpoint returns a `StreamingResponse` whose body is the live
-output of `yt-dlp`'s subprocess piped through `ffmpeg`, which converts to MP3
-or remuxes to fragmented MP4. Nginx is configured with `proxy_buffering off`
+output of `yt-dlp` subprocesses piped through `ffmpeg`, which converts to MP3
+or merges video and audio into fragmented MP4. Nginx is configured with `proxy_buffering off`
 so the bytes flow straight through to the client.
 
 ## Quick start (Docker)
