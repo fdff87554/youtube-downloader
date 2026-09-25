@@ -7,4 +7,4 @@ back through setuptools' dynamic version, which keeps the two from
 drifting apart.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
