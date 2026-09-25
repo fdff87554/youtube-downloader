@@ -92,7 +92,8 @@ ALLOWED_EXTRACTORS = ("youtube.*",)
 # had it. Far fewer hardware decoders handle AV1 than H.264: a car head
 # unit that plays H.264 MP4 failed on these downloads (#112). This is the
 # sort from yt-dlp's own "-t mp4" preset: prefer H.264 and AAC, fall back
-# to other codecs only when a video has no H.264 at all. YouTube rarely
+# to other codecs only when no H.264 rendition fits the requested height
+# ceiling (the [height<=N] filter applies before this sort). YouTube rarely
 # offers H.264 above 1080p, so "best" usually tops out there; that trade
 # was chosen for compatibility.
 VIDEO_FORMAT_SORT = "vcodec:h264,lang,quality,res,fps,hdr:12,acodec:aac"
