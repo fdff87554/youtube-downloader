@@ -328,6 +328,31 @@ def _stream_types(data: bytes) -> list[str]:
     return [kind.decode().lower() for kind in found]
 
 
+def _audio_seconds(data: bytes) -> float:
+    """How long the audio track in ``data`` runs, read by copying it out.
+
+    The last ``time=`` in ffmpeg's progress is where the copied stream
+    ended, so a truncated track reports less than its source.
+    """
+    copy = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-i", "pipe:0", "-map", "0:a", "-c", "copy"]
+        + ["-f", "null", "-"],
+        input=data,
+        capture_output=True,
+        check=True,
+    )
+    hours, minutes, seconds = re.findall(rb"time=(\d+):(\d+):(\d+\.\d+)", copy.stderr)[
+        -1
+    ]
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+# LAVFI_AUDIO's length, and how far the merged track may drift from it
+# (AAC frames are 1024 samples, about 23 ms at 44.1 kHz).
+LAVFI_AUDIO_SECONDS = 2.0
+AUDIO_LENGTH_TOLERANCE = 0.1
+
+
 class TestVideoIsMergedByOurOwnFfmpeg:
     """Video and audio are fetched separately and merged into fragmented MP4.
 
@@ -379,6 +404,23 @@ class TestVideoIsMergedByOurOwnFfmpeg:
             )
 
         assert _stream_types(output) == ["video", "audio"]
+
+    @needs_ffmpeg
+    def test_merged_audio_runs_the_full_length_of_its_source(self) -> None:
+        # Guards our own pipeline cutting the audio short, the symptom of
+        # #115. It cannot reproduce #115's cause: YouTube throttling an
+        # unchunked request only happens against YouTube.
+        with patch(
+            "app.services.youtube._build_video_commands",
+            return_value=(LAVFI_VIDEO, LAVFI_AUDIO),
+        ):
+            output = b"".join(
+                stream_download("https://www.youtube.com/watch?v=test", "mp4")
+            )
+
+        assert _audio_seconds(output) == pytest.approx(
+            LAVFI_AUDIO_SECONDS, abs=AUDIO_LENGTH_TOLERANCE
+        )
 
 
 def _progressive_mp4(path: pathlib.Path, *, moov_first: bool) -> pathlib.Path:
