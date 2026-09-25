@@ -229,6 +229,14 @@ def _top_level_boxes(data: bytes, count: int) -> list[str]:
     return names
 
 
+# Skipped locally when ffmpeg is missing, but never in CI (GitHub sets
+# CI=true): there a missing ffmpeg must fail these tests, not hide them.
+needs_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None and not os.environ.get("CI"),
+    reason="needs ffmpeg",
+)
+
+
 # Stands in for yt-dlp: a short Matroska file with video and audio on
 # stdout, which is what --merge-output-format mkv makes yt-dlp emit.
 LAVFI_MATROSKA = [
@@ -273,7 +281,7 @@ class TestVideoIsRemuxedToFragmentedMp4:
 
         assert pipeline.call_args.args[1] == FRAGMENTED_MP4_REMUX_COMMAND
 
-    @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+    @needs_ffmpeg
     def test_output_is_a_fragmented_mp4(self) -> None:
         with patch(
             "app.services.youtube._build_video_command", return_value=LAVFI_MATROSKA
@@ -324,7 +332,7 @@ def _cat(path: pathlib.Path) -> list[str]:
     ]
 
 
-@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+@needs_ffmpeg
 class TestProgressiveFallbackThroughTheRemux:
     """The single-format fallback reaches the remux stage as a plain MP4.
 
