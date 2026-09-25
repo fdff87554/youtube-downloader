@@ -285,6 +285,81 @@ class TestVideoIsRemuxedToFragmentedMp4:
         assert _top_level_boxes(output, 3) == ["ftyp", "moov", "moof"]
 
 
+def _progressive_mp4(path: pathlib.Path, *, moov_first: bool) -> pathlib.Path:
+    """Write a short single-file MP4 with its moov at the front or the end."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=2:size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=duration=2",
+            "-c:v",
+            "mpeg4",
+            "-c:a",
+            "aac",
+            *(["-movflags", "+faststart"] if moov_first else []),
+            str(path),
+        ],
+        check=True,
+    )
+    return path
+
+
+def _cat(path: pathlib.Path) -> list[str]:
+    # Stands in for yt-dlp handing over a single progressive format,
+    # which it writes to stdout unchanged: --merge-output-format only
+    # applies when two formats are merged.
+    return [
+        sys.executable,
+        "-c",
+        f"import shutil, sys; shutil.copyfileobj(open({str(path)!r}, 'rb'), "
+        "sys.stdout.buffer)",
+    ]
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+class TestProgressiveFallbackThroughTheRemux:
+    """The single-format fallback reaches the remux stage as a plain MP4.
+
+    ffmpeg can only read that from a pipe when the moov comes first.
+    YouTube's progressive itag 18 was observed with moov first; the other
+    layout has to fail loudly rather than pass as an empty success.
+    """
+
+    def test_moov_first_is_remuxed(self, tmp_path: pathlib.Path) -> None:
+        source = _progressive_mp4(tmp_path / "head.mp4", moov_first=True)
+
+        with patch(
+            "app.services.youtube._build_video_command", return_value=_cat(source)
+        ):
+            output = b"".join(
+                stream_download("https://www.youtube.com/watch?v=test", "mp4")
+            )
+
+        assert _top_level_boxes(output, 3) == ["ftyp", "moov", "moof"]
+
+    def test_moov_last_fails_instead_of_serving_an_empty_file(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        source = _progressive_mp4(tmp_path / "tail.mp4", moov_first=False)
+
+        with (
+            patch(
+                "app.services.youtube._build_video_command",
+                return_value=_cat(source),
+            ),
+            pytest.raises(YouTubeError, match="ffmpeg failed"),
+        ):
+            b"".join(stream_download("https://www.youtube.com/watch?v=test", "mp4"))
+
+
 class TestFinalizeProcessKillsGrandchildren:
     """yt-dlp spawns ffmpeg itself when it has to mux two streams.
 

@@ -102,6 +102,12 @@ VIDEO_FORMAT_SORT = "vcodec:h264,lang,quality,res,fps,hdr:12,acodec:aac"
 # neither. default_base_moof is what MSE and CMAF players expect.
 FRAGMENTED_MP4_REMUX_COMMAND = [
     "ffmpeg",
+    # Without this, input ffmpeg cannot read from a pipe is logged and
+    # then ignored: a progressive MP4 with its moov at the end (which the
+    # single-format fallback could fetch) came out as a 1.3 KB file with
+    # no samples, exit 0, and was served as a successful download. With
+    # it the stage exits non-zero and the stream fails instead.
+    "-xerror",
     "-i",
     "pipe:0",
     "-c",
