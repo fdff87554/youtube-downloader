@@ -185,8 +185,10 @@ attachment`.
 For `fmt=mp4`, H.264 video and AAC audio are preferred over AV1 and VP9,
 because far more hardware decoders support them, such as car head units and
 older TVs. YouTube rarely offers H.264 above 1080p, so `quality=best` usually
-tops out at 1080p. A video with no H.264 rendition falls back to the best
-other codec.
+tops out at 1080p. The fixed qualities are ceilings: when a video offers
+H.264 only below the requested height, that lower H.264 is chosen over a
+taller AV1 or VP9 rendition. A video with no H.264 rendition falls back to
+the best other codec.
 
 ### `GET /api/health`
 
