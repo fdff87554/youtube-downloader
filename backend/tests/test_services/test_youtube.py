@@ -12,7 +12,7 @@ from app.services.youtube import (
     VideoNotFoundError,
     _base_opts,
     _build_audio_command,
-    _build_video_command,
+    _build_video_commands,
     _finalize_process,
     _kill_process_group,
     _resolve_video_format,
@@ -354,9 +354,11 @@ class TestCacheDisabled:
     def test_base_opts_disable_cachedir(self) -> None:
         assert _base_opts()["cachedir"] is False
 
-    def test_video_command_passes_no_cache_dir(self) -> None:
-        cmd = _build_video_command("https://www.youtube.com/watch?v=test", "best")
-        assert "--no-cache-dir" in cmd
+    def test_video_commands_pass_no_cache_dir(self) -> None:
+        for cmd in _build_video_commands(
+            "https://www.youtube.com/watch?v=test", "best"
+        ):
+            assert "--no-cache-dir" in cmd
 
     def test_audio_command_passes_no_cache_dir(self) -> None:
         cmd = _build_audio_command("https://www.youtube.com/watch?v=test")
@@ -370,9 +372,11 @@ class TestConfigFilesIgnored:
     -P/-o, the last of which would write media to disk.
     """
 
-    def test_video_command_ignores_config_files(self) -> None:
-        cmd = _build_video_command("https://www.youtube.com/watch?v=test", "best")
-        assert "--ignore-config" in cmd
+    def test_video_commands_ignore_config_files(self) -> None:
+        for cmd in _build_video_commands(
+            "https://www.youtube.com/watch?v=test", "best"
+        ):
+            assert "--ignore-config" in cmd
 
     def test_audio_command_ignores_config_files(self) -> None:
         cmd = _build_audio_command("https://www.youtube.com/watch?v=test")
@@ -382,7 +386,7 @@ class TestConfigFilesIgnored:
         # yt-dlp parses argv left to right, so the flag has to sit ahead of
         # anything a config file could contradict.
         for cmd in (
-            _build_video_command("https://www.youtube.com/watch?v=test", "best"),
+            *_build_video_commands("https://www.youtube.com/watch?v=test", "best"),
             _build_audio_command("https://www.youtube.com/watch?v=test"),
         ):
             assert cmd[0] == "yt-dlp"
@@ -522,7 +526,7 @@ class TestExtractorsRestricted:
 
     def test_both_commands_restrict_extractors(self) -> None:
         for cmd in (
-            _build_video_command("https://www.youtube.com/watch?v=test", "best"),
+            *_build_video_commands("https://www.youtube.com/watch?v=test", "best"),
             _build_audio_command("https://www.youtube.com/watch?v=test"),
         ):
             assert "--use-extractors" in cmd
@@ -559,7 +563,7 @@ class TestExtractorsRestricted:
 
     def test_generic_extractor_is_not_allowed(self) -> None:
         for cmd in (
-            _build_video_command("https://www.youtube.com/watch?v=test", "best"),
+            *_build_video_commands("https://www.youtube.com/watch?v=test", "best"),
             _build_audio_command("https://www.youtube.com/watch?v=test"),
         ):
             assert "generic" not in cmd[cmd.index("--use-extractors") + 1]
@@ -618,30 +622,33 @@ H264_480 = _video_format("h264-480", "avc1.4d401e", 480, 1000)
 
 
 def _select_video_format(quality: str, formats: list[dict]) -> str:
-    """Run yt-dlp's real format selection with the video command's -f and -S.
+    """Run yt-dlp's real format selection with each command's -f and -S.
 
-    Reading both values out of the command, rather than off the
+    Reading the values out of the commands, rather than off the
     constants, is what ties this to the argv yt-dlp actually receives.
+    Returns "<video>+<audio>", the pair the two processes would fetch.
     """
     import yt_dlp
 
-    cmd = _build_video_command("https://www.youtube.com/watch?v=test", quality)
-    opts = {
-        "quiet": True,
-        "simulate": True,
-        "format": cmd[cmd.index("-f") + 1],
-        "format_sort": cmd[cmd.index("-S") + 1].split(","),
-    }
-    info = {
-        "id": "test",
-        "title": "test",
-        "extractor": "youtube",
-        "extractor_key": "Youtube",
-        "webpage_url": "https://www.youtube.com/watch?v=test",
-        "formats": [dict(f) for f in formats],
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.process_ie_result(info, download=False)["format_id"]
+    selected = []
+    for cmd in _build_video_commands("https://www.youtube.com/watch?v=test", quality):
+        opts = {
+            "quiet": True,
+            "simulate": True,
+            "format": cmd[cmd.index("-f") + 1],
+            "format_sort": cmd[cmd.index("-S") + 1].split(","),
+        }
+        info = {
+            "id": "test",
+            "title": "test",
+            "extractor": "youtube",
+            "extractor_key": "Youtube",
+            "webpage_url": "https://www.youtube.com/watch?v=test",
+            "formats": [dict(f) for f in formats],
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            selected.append(ydl.process_ie_result(info, download=False)["format_id"])
+    return "+".join(selected)
 
 
 class TestVideoCodecPreference:
