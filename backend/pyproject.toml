@@ -72,4 +72,15 @@ select = [
     "B",
     "A",
     "SIM",
+    # The three flake8-bandit rules that catch a shell in the loop:
+    # subprocess with shell=True, any other call with shell=True, and
+    # os.system. Every yt-dlp and ffmpeg invocation here is list-form and
+    # takes a user-supplied URL as an argument, so a shell appearing in that
+    # path is the difference between an argument and a command. S603
+    # ("untrusted input in subprocess") is left off deliberately: it fires on
+    # every list-form call too, so it would mean a noqa on each one and a
+    # habit of adding more.
+    "S602",
+    "S604",
+    "S605",
 ]
