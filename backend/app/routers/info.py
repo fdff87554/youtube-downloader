@@ -36,8 +36,10 @@ router = APIRouter(prefix="/api", tags=["info"])
     response_model=VideoInfo | PlaylistInfo,
     responses={
         400: {"model": ErrorEnvelope},
+        403: {"model": ErrorEnvelope},
         404: {"model": ErrorEnvelope},
         500: {"model": ErrorEnvelope},
+        503: {"model": ErrorEnvelope},
     },
 )
 @limiter.limit("30/minute")

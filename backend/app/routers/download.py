@@ -63,8 +63,10 @@ MEDIA_TYPES = {
     responses={
         200: {"content": {"video/mp4": {}, "audio/mpeg": {}}},
         400: {"model": ErrorEnvelope},
+        403: {"model": ErrorEnvelope},
         404: {"model": ErrorEnvelope},
         500: {"model": ErrorEnvelope},
+        503: {"model": ErrorEnvelope},
     },
 )
 @limiter.limit("5/minute")

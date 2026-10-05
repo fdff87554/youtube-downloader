@@ -67,6 +67,39 @@ class TestGetInfo:
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "not_found"
 
+    @pytest.mark.parametrize(
+        ("error_name", "status", "code"),
+        [
+            ("AgeRestrictedError", 403, "age_restricted"),
+            ("BotCheckError", 503, "bot_check"),
+        ],
+    )
+    @patch("app.routers.info.extract_video_info")
+    def test_age_gate_and_bot_check_get_their_own_status(
+        self,
+        mock_extract: MagicMock,
+        error_name: str,
+        status: int,
+        code: str,
+        client,
+    ) -> None:
+        # /api/info maps these the same way /api/download does; the two
+        # endpoints answering the same upstream failure differently would
+        # be worse than either answer.
+        import app.services.youtube as service
+
+        mock_extract.side_effect = getattr(service, error_name)(
+            "ERROR: [youtube] x: upstream said so"
+        )
+
+        response = client.get(
+            "/api/info",
+            params={"url": "https://www.youtube.com/watch?v=test"},
+        )
+
+        assert response.status_code == status
+        assert response.json()["error"]["code"] == code
+
     @patch("app.routers.info.extract_playlist_info")
     def test_get_info_with_playlist_url_returns_playlist_metadata(
         self, mock_extract: MagicMock, client
