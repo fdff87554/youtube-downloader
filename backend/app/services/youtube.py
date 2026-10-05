@@ -9,6 +9,7 @@ import re
 import signal
 import subprocess
 import threading
+import unicodedata
 from collections import deque
 from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
@@ -680,6 +681,22 @@ def _feed_stdin(process: subprocess.Popen[bytes], payload: bytes) -> None:
         process.stdin.close()
 
 
+def _neutralize_control_chars(text: str) -> str:
+    """Replace control and format characters with spaces.
+
+    yt-dlp's stderr carries remote-controlled text: the error line for a
+    video quotes its title, and yt-dlp colours its own output. Only the
+    trailing newline is stripped by the reader, so a title holding a bare
+    carriage return, an ANSI erase-line sequence or U+202E arrives intact
+    and can overwrite or reorder what an operator reads in the log. Every
+    Unicode "C" category character goes, which covers C0/C1 controls and
+    format characters such as the bidi overrides.
+    """
+    return "".join(
+        " " if unicodedata.category(ch).startswith("C") else ch for ch in text
+    )
+
+
 def _drain_stderr(name: str, stream: IO[bytes], tail: deque[str]) -> None:
     """Forward subprocess stderr lines to the logger, keeping the tail.
 
@@ -689,7 +706,9 @@ def _drain_stderr(name: str, stream: IO[bytes], tail: deque[str]) -> None:
     """
     try:
         for line in iter(stream.readline, b""):
-            text = line.decode("utf-8", errors="replace").rstrip()
+            text = _neutralize_control_chars(
+                line.decode("utf-8", errors="replace")
+            ).strip()
             if text:
                 logger.warning("%s: %s", name, text)
                 tail.append(text)

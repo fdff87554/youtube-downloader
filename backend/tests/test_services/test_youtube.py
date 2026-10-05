@@ -1,5 +1,7 @@
 """Unit tests for the YouTube service layer."""
 
+import io
+import logging
 import signal
 from collections import deque
 from unittest.mock import MagicMock, patch
@@ -14,6 +16,7 @@ from app.services.youtube import (
     _build_audio_command,
     _build_info_command,
     _build_video_commands,
+    _drain_stderr,
     _finalize_process,
     _kill_process_group,
     _resolve_video_format,
@@ -926,3 +929,52 @@ class TestDownloadProcesses:
 
         with patch("app.services.youtube._start_stderr_drainer", return_value=drainer):
             assert processes.register("yt-dlp", MagicMock(), deque()) is drainer
+
+
+class TestStderrIsNeutralizedBeforeLogging:
+    """yt-dlp's stderr quotes remote text, so it must not be able to forge a line."""
+
+    @staticmethod
+    def _drain(raw: bytes) -> tuple[list[str], deque[str]]:
+        tail: deque[str] = deque(maxlen=10)
+        records: list[logging.LogRecord] = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        service_logger = logging.getLogger("app.services.youtube")
+        service_logger.addHandler(handler)
+        try:
+            _drain_stderr("yt-dlp", io.BytesIO(raw), tail)
+        finally:
+            service_logger.removeHandler(handler)
+        return [r.getMessage() for r in records], tail
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b"ERROR: video 'evil\rINFO: download complete' is unavailable\n",
+            b"ERROR: video 'evil\x1b[2KINFO: faked' is unavailable\n",
+            b"ERROR: video 'evil\xe2\x80\xaegnp.txt' is unavailable\n",
+            b"ERROR: video 'evil\x08\x08\x08ok' is unavailable\n",
+        ],
+    )
+    def test_control_characters_never_reach_the_log(self, payload: bytes) -> None:
+        messages, tail = self._drain(payload)
+
+        assert messages, "the line should still be logged, just defanged"
+        for text in [*messages, *tail]:
+            assert not any(ch in text for ch in "\r\x1b\x08")
+            assert "\u202e" not in text
+
+    def test_ordinary_text_survives(self) -> None:
+        messages, tail = self._drain(
+            "ERROR: [youtube] 第三講: Video unavailable\n".encode()
+        )
+
+        assert tail[0] == "ERROR: [youtube] 第三講: Video unavailable"
+        assert messages[0].endswith("ERROR: [youtube] 第三講: Video unavailable")
+
+    def test_blank_lines_are_still_dropped(self) -> None:
+        messages, tail = self._drain(b"\n   \n\r\n")
+
+        assert messages == []
+        assert list(tail) == []
