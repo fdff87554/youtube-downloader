@@ -83,4 +83,21 @@ select = [
     "S602",
     "S604",
     "S605",
+    # The S rules above only know about subprocess and os: asyncio's own
+    # shell spawner goes unflagged by all three. Verified against the ruff
+    # the pre-commit hook pins, which is what CI enforces. Nothing here uses
+    # asyncio subprocesses today, so this bans a door rather than closing
+    # one; see flake8-tidy-imports below for what it does and does not reach.
+    "TID",
 ]
+
+# TID251 resolves names through imports, so it catches both the qualified
+# call and the from-import (including an aliased one). It cannot catch
+# `loop.subprocess_shell(...)`: that is an attribute on a local variable and
+# ruff has no type to resolve it from. Verified by probe against the pinned
+# ruff -- an entry for AbstractEventLoop.subprocess_shell was tried and never
+# fired, so it is left out rather than kept as a check that looks like cover
+# and is not. Reaching that form still needs review, not lint.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"asyncio.create_subprocess_shell".msg = "starts a shell; use create_subprocess_exec with an argument list"
+"asyncio.subprocess.create_subprocess_shell".msg = "starts a shell; use create_subprocess_exec with an argument list"
