@@ -137,3 +137,20 @@ class TestInteractiveDocs:
 
         assert client.get("/api/docs").status_code == 200
         assert client.get("/api/openapi.json").status_code == 200
+
+    @pytest.mark.parametrize("path", ["/api/info", "/api/download"])
+    def test_schema_declares_every_error_status_the_endpoint_returns(
+        self, monkeypatch: pytest.MonkeyPatch, path: str
+    ) -> None:
+        # The handlers answer 403 and 503, but a status only reaches the
+        # generated schema if it is in the route's `responses`. Nothing else
+        # in the suite notices the two drifting apart.
+        monkeypatch.setenv("ALLOWED_ORIGINS", "https://example.com")
+        monkeypatch.setenv("DEBUG", "true")
+        client = TestClient(create_app())
+
+        schema = client.get("/api/openapi.json").json()
+        declared = schema["paths"][path]["get"]["responses"]
+
+        for status in ("400", "403", "404", "500", "503"):
+            assert status in declared, f"{path} does not declare {status}"

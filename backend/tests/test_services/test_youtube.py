@@ -7,8 +7,11 @@ from collections import deque
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yt_dlp.utils
 
 from app.services.youtube import (
+    AgeRestrictedError,
+    BotCheckError,
     DownloadProcesses,
     InvalidURLError,
     VideoNotFoundError,
@@ -1006,3 +1009,62 @@ class TestStderrIsNeutralizedBeforeLogging:
 
         assert messages == []
         assert list(tail) == []
+
+
+class TestAgeGateAndBotCheckAreTheirOwnFailures:
+    """Both arrive worded as "unplayable", so order decides what the caller learns."""
+
+    @staticmethod
+    def _classify(detail: str) -> type[Exception]:
+        from app.services.youtube import _raise_from_subprocess_failure
+
+        try:
+            _raise_from_subprocess_failure("yt-dlp", 1, deque([detail]), None)
+        except Exception as exc:  # noqa: BLE001 - the type is the assertion
+            return type(exc)
+        raise AssertionError("expected a failure")  # pragma: no cover
+
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            "ERROR: [youtube] x: Sign in to confirm your age. "
+            "This video may be inappropriate for some users.",
+            "ERROR: [youtube] x: This video is age-restricted and YouTube is "
+            "requiring account age-verification",
+            "ERROR: [youtube] x: age_verification_required",
+        ],
+    )
+    def test_age_gate_is_not_reported_as_a_missing_video(self, detail: str) -> None:
+        assert self._classify(detail) is AgeRestrictedError
+
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            "ERROR: [youtube] x: Sign in to confirm you're not a bot. "
+            "This helps protect our community.",
+            "ERROR: [youtube] x: Sign in to confirm that you are not a bot",
+        ],
+    )
+    def test_bot_check_is_not_reported_as_a_missing_video(self, detail: str) -> None:
+        assert self._classify(detail) is BotCheckError
+
+    def test_an_ordinary_missing_video_is_unaffected(self) -> None:
+        assert (
+            self._classify("ERROR: [youtube] x: Video unavailable")
+            is VideoNotFoundError
+        )
+
+    def test_a_format_failure_still_wins_over_both(self) -> None:
+        from app.services.youtube import FormatUnavailableError
+
+        detail = "ERROR: [youtube] x: Requested format is not available"
+        assert self._classify(detail) is FormatUnavailableError
+
+    def test_the_library_path_classifies_identically(self) -> None:
+        # The two paths drifting apart is exactly what the shared marker
+        # tuples exist to prevent.
+        from app.services.youtube import _raise_from_download_error
+
+        detail = "ERROR: [youtube] x: Sign in to confirm you're not a bot"
+        with pytest.raises(BotCheckError):
+            _raise_from_download_error(yt_dlp.utils.DownloadError(detail))

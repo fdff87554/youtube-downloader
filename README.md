@@ -214,9 +214,18 @@ Errors use a unified envelope:
 ```
 
 Codes you can expect: `invalid_url`, `unsupported_url`,
-`format_unavailable` and `playlist_too_large` (400), `not_found`
-(404), `rate_limited` (429), `extraction_error` and
-`download_error` (500).
+`format_unavailable` and `playlist_too_large` (400), `age_restricted`
+(403), `not_found` (404), `rate_limited` (429), `bot_check` (503),
+`extraction_error` and `download_error` (500).
+
+Two of those say something about the deployment rather than the link:
+
+- `age_restricted` — YouTube wants a signed-in, age-verified account.
+  This service never signs in, so no retry or other quality helps.
+- `bot_check` — YouTube is challenging this host's IP as automated
+  traffic. The video is fine; the server is the problem. If it persists,
+  the levers are a PO Token provider or a player client that does not
+  need one.
 
 One exception to the envelope: a malformed or missing query parameter
 is answered by FastAPI's own request validation with `422` and a
