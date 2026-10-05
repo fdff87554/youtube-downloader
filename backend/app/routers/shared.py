@@ -17,6 +17,20 @@ UNSUPPORTED_URL_MESSAGE = (
     "Check the link and try again."
 )
 
+# The service never signs in, so an age gate is terminal: no retry and no
+# other quality reaches the video.
+AGE_RESTRICTED_MESSAGE = (
+    "YouTube requires a signed-in, age-verified account for this video, "
+    "and this service does not sign in."
+)
+# Says nothing about the video: YouTube has flagged this deployment's IP.
+# Phrased for the person who pasted the link, while the code and the logged
+# detail tell the operator which lever to pull.
+BOT_CHECK_MESSAGE = (
+    "YouTube is currently refusing automated requests from this server. "
+    "Try again later, or ask the operator to check the service."
+)
+
 
 def error_response(
     status_code: int,

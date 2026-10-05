@@ -71,6 +71,26 @@ FORMAT_UNAVAILABLE_MARKERS = ("requested format is not available",)
 # yt-dlp says one of these when no permitted extractor claims the URL.
 # It happens for YouTube paths that are not media -- /about, /t/terms,
 # a mistyped path -- so it is the caller's input, not a server fault.
+# YouTube's own playabilityStatus reason, passed through by yt-dlp rather
+# than produced by it, so these match the site's wording and not the
+# library's. Checked before UNAVAILABLE_MARKERS: an age gate reports the
+# video as unplayable too, and "this video is not available" would win.
+AGE_RESTRICTED_MARKERS = (
+    "age-restricted",
+    "confirm your age",
+    "age_verification_required",
+    "age_check_required",
+    "inappropriate for some users",
+)
+
+# Also YouTube's wording, not yt-dlp's. Both the apostrophe and the
+# "that you're" variant reduce to this substring. Kept separate from the
+# age gate because the operator's response differs: an age gate needs an
+# account this service deliberately does not have, while a bot check means
+# YouTube has flagged this deployment's IP and a PO Token provider or a
+# different player client is the lever.
+BOT_CHECK_MARKERS = ("not a bot",)
+
 UNSUPPORTED_URL_MARKERS = ("no suitable extractor", "unsupported url")
 # The host allow-list in YOUTUBE_URL_PATTERN validates the string the
 # caller sent; it cannot constrain where yt-dlp goes next. Paths that
@@ -130,6 +150,24 @@ class UnsupportedURLError(YouTubeError):
 
     Like :class:`PlaylistTooLargeError`, this describes the caller's
     input rather than a server failure, so callers map it to a 4xx.
+    """
+
+
+class AgeRestrictedError(YouTubeError):
+    """Raised when YouTube requires an age-verified account for the video.
+
+    The service never signs in, so this is terminal rather than transient:
+    no retry and no other quality will help.
+    """
+
+
+class BotCheckError(YouTubeError):
+    """Raised when YouTube challenges this deployment as automated traffic.
+
+    Unlike the other failures this says nothing about the video: YouTube
+    has flagged the host's IP. It is the signal that the deployment needs a
+    PO Token provider or a player client that does not require one, so it
+    gets its own code rather than disappearing into a generic 500.
     """
 
 
@@ -751,6 +789,13 @@ def _raise_from_subprocess_failure(
         raise UnsupportedURLError(detail)
     if _is_format_unavailable_message(detail):
         raise FormatUnavailableError(detail)
+    # Before the unavailable check: both an age gate and a bot challenge
+    # also describe the video as unplayable, so the looser marker wins
+    # otherwise and the real cause is lost.
+    if _is_age_restricted_message(detail):
+        raise AgeRestrictedError(detail)
+    if _is_bot_check_message(detail):
+        raise BotCheckError(detail)
     if _is_unavailable_message(detail):
         raise VideoNotFoundError(f"Video is unavailable: {detail}")
     raise YouTubeError(f"{name} failed: {detail}")
@@ -998,6 +1043,18 @@ def _parse_formats(raw_formats: list[dict[str, Any]]) -> list[VideoFormat]:
     return formats
 
 
+def _is_age_restricted_message(message: str) -> bool:
+    """Whether an upstream error text means "YouTube wants a verified account"."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in AGE_RESTRICTED_MARKERS)
+
+
+def _is_bot_check_message(message: str) -> bool:
+    """Whether an upstream error text means "YouTube thinks we are a bot"."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in BOT_CHECK_MARKERS)
+
+
 def _is_unavailable_message(message: str) -> bool:
     """Whether an upstream error text means "this video is not there"."""
     lowered = message.lower()
@@ -1021,6 +1078,11 @@ def _raise_from_download_error(e: yt_dlp.utils.DownloadError) -> None:
         raise UnsupportedURLError(str(e)) from e
     if _is_format_unavailable_message(str(e)):
         raise FormatUnavailableError(str(e)) from e
+    # Same ordering as the subprocess path above, for the same reason.
+    if _is_age_restricted_message(str(e)):
+        raise AgeRestrictedError(str(e)) from e
+    if _is_bot_check_message(str(e)):
+        raise BotCheckError(str(e)) from e
     if _is_unavailable_message(str(e)):
         raise VideoNotFoundError(f"Video is unavailable: {e}") from e
     raise YouTubeError(f"Download error: {e}") from e

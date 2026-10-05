@@ -108,6 +108,42 @@ class TestDownloadVideo:
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "not_found"
 
+    @pytest.mark.parametrize(
+        ("error_name", "status", "code"),
+        [
+            ("AgeRestrictedError", 403, "age_restricted"),
+            ("BotCheckError", 503, "bot_check"),
+        ],
+    )
+    @patch("app.routers.download.stream_download")
+    def test_age_gate_and_bot_check_get_their_own_status(
+        self,
+        mock_stream: MagicMock,
+        error_name: str,
+        status: int,
+        code: str,
+        client,
+    ) -> None:
+        # Both used to land on the generic 500, where they were
+        # indistinguishable from a transport failure.
+        import app.services.youtube as service
+
+        error_type = getattr(service, error_name)
+
+        def failing_generator():
+            raise error_type("ERROR: [youtube] x: upstream said so")
+            yield b""  # pragma: no cover - makes this a generator
+
+        mock_stream.return_value = failing_generator()
+
+        response = client.get(
+            "/api/download",
+            params={"url": "https://www.youtube.com/watch?v=test"},
+        )
+
+        assert response.status_code == status
+        assert response.json()["error"]["code"] == code
+
     @patch("app.routers.download.stream_download")
     def test_download_of_unsupported_url_returns_400(
         self,

@@ -7,12 +7,16 @@ from fastapi.responses import JSONResponse
 
 from app.limiter import limiter
 from app.routers.shared import (
+    AGE_RESTRICTED_MESSAGE,
+    BOT_CHECK_MESSAGE,
     FORMAT_UNAVAILABLE_MESSAGE,
     UNSUPPORTED_URL_MESSAGE,
     error_response,
 )
 from app.schemas.video import ErrorEnvelope, PlaylistInfo, VideoInfo
 from app.services.youtube import (
+    AgeRestrictedError,
+    BotCheckError,
     FormatUnavailableError,
     InvalidURLError,
     PlaylistTooLargeError,
@@ -79,6 +83,22 @@ def get_info(
     except PlaylistTooLargeError as e:
         # The message names the limit, so the caller can act on it.
         return error_response(400, "playlist_too_large", str(e))
+    except AgeRestrictedError as e:
+        return error_response(
+            403,
+            "age_restricted",
+            AGE_RESTRICTED_MESSAGE,
+            detail=str(e),
+        )
+    except BotCheckError as e:
+        # 503, not 500: the request was well-formed and the video is fine.
+        # YouTube is throttling this host, so a later attempt may work.
+        return error_response(
+            503,
+            "bot_check",
+            BOT_CHECK_MESSAGE,
+            detail=str(e),
+        )
     except VideoNotFoundError as e:
         return error_response(
             404,
