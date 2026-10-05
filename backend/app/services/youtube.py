@@ -681,8 +681,18 @@ def _feed_stdin(process: subprocess.Popen[bytes], payload: bytes) -> None:
         process.stdin.close()
 
 
+# The two separators Python treats as line breaks that are not in the "C"
+# category: U+2028 LINE SEPARATOR is Zl and U+2029 PARAGRAPH SEPARATOR is Zp.
+# str.splitlines() breaks on both, so a log consumer that splits lines sees a
+# forged line even though neither is a control character. Named explicitly
+# rather than excluding all of "Z": that class also holds U+00A0 NO-BREAK
+# SPACE and the other spaces, which are ordinary text in a title and must
+# survive.
+_LINE_SEPARATORS = ("\u2028", "\u2029")
+
+
 def _neutralize_control_chars(text: str) -> str:
-    """Replace control and format characters with spaces.
+    """Replace control, format and line-separator characters with spaces.
 
     yt-dlp's stderr carries remote-controlled text: the error line for a
     video quotes its title, and yt-dlp colours its own output. Only the
@@ -690,10 +700,15 @@ def _neutralize_control_chars(text: str) -> str:
     carriage return, an ANSI erase-line sequence or U+202E arrives intact
     and can overwrite or reorder what an operator reads in the log. Every
     Unicode "C" category character goes, which covers C0/C1 controls and
-    format characters such as the bidi overrides.
+    format characters such as the bidi overrides, plus the two separators
+    in ``_LINE_SEPARATORS`` that sit outside that class but still break a
+    line for anything calling ``str.splitlines()``.
     """
     return "".join(
-        " " if unicodedata.category(ch).startswith("C") else ch for ch in text
+        " "
+        if unicodedata.category(ch).startswith("C") or ch in _LINE_SEPARATORS
+        else ch
+        for ch in text
     )
 
 

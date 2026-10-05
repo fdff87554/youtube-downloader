@@ -965,6 +965,34 @@ class TestStderrIsNeutralizedBeforeLogging:
             assert not any(ch in text for ch in "\r\x1b\x08")
             assert "\u202e" not in text
 
+    @pytest.mark.parametrize(
+        "separator",
+        ["\u2028", "\u2029"],
+        ids=["line-separator", "paragraph-separator"],
+    )
+    def test_unicode_line_separators_cannot_split_a_record(
+        self, separator: str
+    ) -> None:
+        # U+2028 is Zl and U+2029 is Zp, so neither is caught by the "C"
+        # category check -- but str.splitlines() breaks on both, which is
+        # exactly the forged second line this is supposed to prevent.
+        payload = f"ERROR: video 'evil{separator}INFO: done' is unavailable\n".encode()
+
+        messages, tail = self._drain(payload)
+
+        assert messages, "the line should still be logged, just defanged"
+        for text in [*messages, *tail]:
+            assert separator not in text
+            assert len(text.splitlines()) == 1
+
+    def test_non_breaking_space_is_not_a_line_separator(self) -> None:
+        # U+00A0 is Zs. Excluding the whole "Z" class to catch U+2028/U+2029
+        # would take it too, and it is ordinary text inside a video title.
+        messages, tail = self._drain("ERROR: a\u00a0b is unavailable\n".encode())
+
+        assert tail[0] == "ERROR: a\u00a0b is unavailable"
+        assert messages[0].endswith("ERROR: a\u00a0b is unavailable")
+
     def test_ordinary_text_survives(self) -> None:
         messages, tail = self._drain(
             "ERROR: [youtube] 第三講: Video unavailable\n".encode()
