@@ -93,13 +93,145 @@ CONTROL_CHARACTER_VECTORS = (
     chr(0x2029),
 )
 
-# C7 layer 1: a format selector has to constrain the protocol, or an
-# unmeterable downloader can be the *preferred* pick rather than an
-# edge case.
-_PROTOCOL_CONSTRAINT = re.compile(r"\[protocol\s*[\^$*~!]?=")
+# C7.selectable: a downloader can only be metered if the bytes pass
+# through Python. HttpFD and DashSegmentsFD do; anything yt-dlp hands
+# to ffmpeg does not, and m3u8_native hands the whole transfer over
+# whenever HlsFD cannot handle the manifest itself.
+_METERED_PROTOCOL_PREFIXES = ("http", "ftp")
+
+# The offline pool each download selector is evaluated against. The
+# unmeterable renditions carry the *higher* bitrate on purpose: proto
+# sits after quality, tbr, filesize, vbr, height and width in yt-dlp's
+# default sort order, so it only breaks a tie. A pool of equal-quality
+# renditions shows https winning and invites the false conclusion that
+# an unconstrained selector is safe.
+_HIGH_TBR = 6000
+_LOW_TBR = 3000
+
+
+def _probe_format(format_id: str, protocol: str, kind: str, tbr: int) -> dict[str, Any]:
+    common = {
+        "format_id": format_id,
+        "protocol": protocol,
+        "url": f"https://conformance.invalid/{format_id}",
+        "tbr": tbr,
+        "filesize": tbr * 1000,
+    }
+    if kind == "video":
+        return common | {
+            "ext": "mp4",
+            "vcodec": "avc1.4d401f",
+            "acodec": "none",
+            "height": 1080,
+            "width": 1920,
+            "fps": 30,
+        }
+    if kind == "audio":
+        return common | {
+            "ext": "m4a",
+            "vcodec": "none",
+            "acodec": "mp4a.40.2",
+            "abr": tbr,
+        }
+    return common | {
+        "ext": "mp4",
+        "vcodec": "avc1.4d401f",
+        "acodec": "mp4a.40.2",
+        "height": 1080,
+        "width": 1920,
+        "fps": 30,
+    }
+
+
+_FORMAT_KINDS = ("video", "audio", "progressive")
+
+
+def _mixed_pool() -> list[dict[str, Any]]:
+    """Meterable and unmeterable renditions of every shape.
+
+    Rich enough that a correctly constrained selector finds something,
+    so "no match" here means the selector could not be exercised
+    rather than that it is safe.
+    """
+    pool = []
+    for kind in _FORMAT_KINDS:
+        pool.append(_probe_format(f"http-{kind}", "https", kind, _LOW_TBR))
+        pool.append(_probe_format(f"hlsnative-{kind}", "m3u8_native", kind, _HIGH_TBR))
+        pool.append(_probe_format(f"hlsffmpeg-{kind}", "m3u8", kind, _HIGH_TBR))
+    return pool
+
+
+def _unmeterable_only_pool() -> list[dict[str, Any]]:
+    """Nothing meterable on offer, which is what exercises a fallback.
+
+    A selector like ``bestaudio[protocol^=http]/best`` passes against
+    the mixed pool: its first branch matches, so the unconstrained
+    second branch is never reached. Removing every meterable rendition
+    forces each later branch to be the one that selects, and a
+    correctly constrained selector then has to match *nothing* rather
+    than fall through to an unmeterable format.
+    """
+    pool = []
+    for kind in _FORMAT_KINDS:
+        pool.append(_probe_format(f"hlsnative-{kind}", "m3u8_native", kind, _HIGH_TBR))
+        pool.append(_probe_format(f"hlsffmpeg-{kind}", "m3u8", kind, _HIGH_TBR))
+    return pool
+
+
+def _selected_formats(
+    selector: str, sort: list[str] | None, pool: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """What yt-dlp's own selector picks out of ``pool``.
+
+    Evaluating the selector is the only way to check C7.selectable.
+    Searching the string for a protocol filter passes
+    ``bestaudio[protocol^=http]/best``, whose second branch is
+    unconstrained, and ``best[protocol=m3u8]``, which contains a
+    protocol filter that selects exactly the wrong thing.
+
+    Raises whatever yt-dlp raises when nothing matches; callers decide
+    whether that is the answer they wanted.
+    """
+    ydl = yt_dlp.YoutubeDL(
+        {"quiet": True, "no_warnings": True, **({"format_sort": sort} if sort else {})}
+    )
+    info = {
+        "formats": [dict(entry) for entry in pool],
+        "id": "conformance",
+        "title": "conformance",
+        "extractor": "youtube",
+        "extractor_key": "Youtube",
+        "webpage_url": "https://conformance.invalid/conformance",
+        "incomplete_formats": False,
+    }
+    if not hasattr(ydl, "build_format_selector"):
+        pytest.fail(
+            "yt_dlp.YoutubeDL no longer exposes build_format_selector, so "
+            "selectors cannot be evaluated; this test needs rewriting "
+            "against whatever replaced it"
+        )
+    ydl.sort_formats(info)
+    return list(ydl.build_format_selector(selector)(info))
+
+
+def _unmetered(formats: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """The picked formats whose protocol no Python-side downloader meters."""
+    return [
+        (str(entry.get("format_id")), str(entry.get("protocol") or ""))
+        for entry in formats
+        if not str(entry.get("protocol") or "").startswith(_METERED_PROTOCOL_PREFIXES)
+    ]
+
 
 EXTRACT = "extract"
 DOWNLOAD = "download"
+
+
+def _flag_value(arguments: list[str], flag: str) -> str | None:
+    for current, value in itertools.pairwise(arguments):
+        if current == flag:
+            return value
+    return None
 
 
 @dataclass(frozen=True)
@@ -134,6 +266,23 @@ class CallSite:
     @property
     def drives_in_process(self) -> bool:
         return self.options is not None
+
+    @property
+    def format_sort(self) -> list[str] | None:
+        """The ``format_sort`` this call site applies, if any.
+
+        Derived rather than declared, so the adapter cannot hand the
+        selector check a different sort from the one the code uses. It
+        matters because sort decides which of several matching formats
+        wins, and protocol is only a tiebreak within it.
+        """
+        if self.options is not None:
+            sort = self.options.get("format_sort")
+            return list(sort) if sort else None
+        value = _flag_value(self.arguments or [], "-S") or _flag_value(
+            self.arguments or [], "--format-sort"
+        )
+        return value.split(",") if value else None
 
 
 def _repository_root() -> Path:
@@ -267,13 +416,6 @@ def _format_selectors(site: CallSite) -> list[str]:
         for flag, value in itertools.pairwise(arguments)
         if flag in {"-f", "--format"}
     ]
-
-
-def _flag_value(arguments: list[str], flag: str) -> str | None:
-    for current, value in itertools.pairwise(arguments):
-        if current == flag:
-            return value
-    return None
 
 
 class TestTheProfileIsComplete:
@@ -531,22 +673,64 @@ class TestTheByteCeilingIsDeclaredAndReachable:
     def test_the_ceiling_is_a_positive_number(self, profile: dict[str, Any]) -> None:
         assert profile["max_bytes"] > 0
 
-    def test_every_downloading_site_constrains_the_protocol(
+    def test_every_downloading_site_rejects_unmeterable_formats(
         self, call_sites: list[CallSite]
     ) -> None:
-        # Layer 1 of C7. Measured against yt-dlp's own
-        # build_format_selector, "bestaudio/best" picked an m3u8 format
-        # served by FFmpegFD, which reports no progress and so cannot
-        # be metered. The unmeterable path was the preferred pick, not
-        # an exceptional one.
+        # C7.selectable, checked by evaluating each selector against an
+        # offline pool in which the unmeterable renditions are the
+        # better ones. Every branch of the selector is exercised,
+        # because the pool offers something for each.
         for site in _sites_for(call_sites, DOWNLOAD):
             selectors = _format_selectors(site)
             assert selectors, f"{site.name} downloads but exposes no selector"
             for selector in selectors:
-                assert _PROTOCOL_CONSTRAINT.search(selector), (
-                    f"{site.name} selector {selector!r} does not constrain "
-                    "protocol, so an unmeterable downloader can be the "
-                    "preferred pick"
+                try:
+                    chosen = _selected_formats(
+                        selector, site.format_sort, _mixed_pool()
+                    )
+                except Exception as error:  # noqa: BLE001
+                    pytest.fail(
+                        f"{site.name} selector {selector!r} matched nothing "
+                        "in a pool offering meterable and unmeterable "
+                        "renditions of every shape, so it could not be "
+                        f"exercised: {type(error).__name__}"
+                    )
+                assert chosen, (
+                    f"{site.name} selector {selector!r} matched nothing in "
+                    "the conformance pool, so it could not be exercised"
+                )
+                unmetered = _unmetered(chosen)
+                assert not unmetered, (
+                    f"{site.name} selector {selector!r} preferred "
+                    f"{unmetered} over the meterable renditions on offer; "
+                    "no Python-side downloader meters those protocols, so "
+                    "the byte ceiling cannot hold on them"
+                )
+
+    def test_no_downloading_selector_falls_back_to_an_unmeterable_format(
+        self, call_sites: list[CallSite]
+    ) -> None:
+        # The other half of C7.selectable, and the one a single pool
+        # misses: a selector whose first branch is constrained and
+        # whose fallback is not passes against the mixed pool, because
+        # the fallback is never reached there. With nothing meterable
+        # on offer, a correctly constrained selector must match
+        # nothing at all.
+        for site in _sites_for(call_sites, DOWNLOAD):
+            for selector in _format_selectors(site):
+                try:
+                    chosen = _selected_formats(
+                        selector, site.format_sort, _unmeterable_only_pool()
+                    )
+                except Exception:  # noqa: BLE001
+                    # Nothing matched, which is the required outcome.
+                    continue
+                unmetered = _unmetered(chosen)
+                assert not unmetered, (
+                    f"{site.name} selector {selector!r} fell back to "
+                    f"{unmetered} when no meterable format was offered; a "
+                    "branch of it is unconstrained, and refusing the "
+                    "download is the required outcome"
                 )
 
     def test_every_in_process_downloading_site_meters_mid_transfer(
