@@ -170,6 +170,12 @@ mandatory; none has a default.
 - `canonical_region_sha256` -- sha256 of the canonical region of the
   copied test; see [Drift control](#drift-control).
 - `extractor_spec` -- the `allowed_extractors` value in use.
+- `accepts_urls`, `rejects_urls` -- the accept/reject matrix this
+  repository claims for its pin. C1 is "the matrix matches what this
+  repository declares", so the declaration has to be data, not prose.
+  C6 reuses the same two lists: an accepted URL must survive the
+  canonical rebuild and still pass the pin, and a rejected one must be
+  refused by the rebuild.
 - `cachedir` -- `false`, or the path. Not unified; see
   [Evaluated and not adopted](#evaluated-and-not-adopted).
 - `codec_policy` -- `h264-preferred`, `h264-forced`, `audio-only`, or
