@@ -28,6 +28,61 @@ repository, which is the canonical home; see
 Drop the `.example` suffix on the first one. Keep its name
 `test_ytdlp_conformance.py`, because the drift check looks for it.
 
+### How the adapter imports the test
+
+The adapter needs three names from the test module -- `CallSite`,
+`EXTRACT` and `DOWNLOAD` -- and the spelling that imports them is not
+a free choice. What follows was measured under these conditions, and
+is only claimed for them:
+
+- pytest's default `--import-mode=prepend` (pytest 9.0.3,
+  `_pytest/main.py`: `default="prepend"`);
+- the adapter in `tests/conftest.py`, beside the copied test;
+- the `pytest` entry point, not `python -m pytest`.
+
+Under those, **which spelling works depends on whether the test
+directory is a package**, and no single form works in both layouts:
+
+```text
+tests/__init__.py absent   from test_ytdlp_conformance import ...
+tests/__init__.py present  from tests.test_ytdlp_conformance import ...
+```
+
+Each is an error in the other layout. With an `__init__.py` the module
+is imported as `tests.<name>`, so the bare spelling finds nothing;
+without one it is imported as a top-level module, so the qualified
+spelling finds no `tests` package.
+
+**Under `--import-mode=importlib` the answer is different**, because
+pytest then does not touch `sys.path` at all
+([import modes][pytest-import-modes]). Measured the same way: the
+qualified spelling works in both layouts and the bare one in neither.
+A repository on that mode should use the qualified spelling and can
+ignore the table above.
+
+**And `python -m pytest` shifts it again**, because that entry point
+puts the working directory on `sys.path`. Run from the project root
+it makes the qualified spelling work in both layouts -- which is how
+an import ships green in a CI that runs `python -m pytest` from the
+root and breaks for whoever types `pytest`. Run from anywhere else it
+stops helping, and can invert:
+
+```text
+no __init__.py, qualified, from the project root   works
+no __init__.py, qualified, from one level above    fails
+no __init__.py, qualified, from inside tests/      fails
+__init__.py,    bare,      from inside tests/      works
+```
+
+That last row is the module being imported a second time under a
+different name, which is worth avoiding rather than relying on.
+
+[pytest-import-modes]: https://docs.pytest.org/en/stable/explanation/pythonpath.html#import-modes
+
+Of the three repositories, two have an `__init__.py` under `tests/`
+and one does not, so both spellings are in use. The example below
+carries the bare one.
+
 The test holds **no import of repository code**. The adapter in
 `conftest-fixture.py.example` is the single seam, which is what lets
 the test itself stay byte-identical in all three repositories while the

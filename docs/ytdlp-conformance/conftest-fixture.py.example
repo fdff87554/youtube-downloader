@@ -32,6 +32,12 @@ from app.services.youtube import (  # type: ignore[import-not-found]
     _neutralize_control_chars,
     normalize_youtube_url,
 )
+# Spelled for a test directory that is NOT a package, under pytest's
+# default --import-mode=prepend. With a tests/__init__.py this has to
+# be `from tests.test_ytdlp_conformance import ...` instead, and
+# under --import-mode=importlib the qualified spelling is the one that
+# works in either layout. See "How the adapter imports the test" in
+# README.md for the measurements and the conditions they hold under.
 from test_ytdlp_conformance import DOWNLOAD, EXTRACT, CallSite
 
 _SAMPLE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
