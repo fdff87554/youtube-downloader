@@ -28,6 +28,33 @@ repository, which is the canonical home; see
 Drop the `.example` suffix on the first one. Keep its name
 `test_ytdlp_conformance.py`, because the drift check looks for it.
 
+### How the adapter imports the test
+
+The adapter needs three names from the test module -- `CallSite`,
+`EXTRACT` and `DOWNLOAD` -- and **which spelling imports them depends
+on whether the test directory is a package**. No single form works in
+both layouts, so check before copying:
+
+```text
+tests/__init__.py absent   from test_ytdlp_conformance import ...
+tests/__init__.py present  from tests.test_ytdlp_conformance import ...
+```
+
+Each is an error in the other layout. With an `__init__.py` the module
+is imported as `tests.<name>`, so the bare spelling finds nothing;
+without one it is imported as a top-level module, so the qualified
+spelling finds no `tests` package.
+
+Measured against the `pytest` entry point. `python -m pytest` is more
+forgiving: it puts the working directory on `sys.path`, so the
+qualified spelling resolves in both layouts. That is a good way to
+ship an import that works in CI and breaks for whoever runs `pytest`
+directly.
+
+Of the three repositories, two have an `__init__.py` under `tests/`
+and one does not, so both spellings are in use. The example below
+carries the bare one.
+
 The test holds **no import of repository code**. The adapter in
 `conftest-fixture.py.example` is the single seam, which is what lets
 the test itself stay byte-identical in all three repositories while the
