@@ -210,13 +210,8 @@ def _as_subprocess(sites: list[CallSite]) -> list[CallSite]:
     return [site for site in sites if not site.drives_in_process]
 
 
-def _extractors_matching(spec: list[str], url: str) -> list[str]:
-    """Extractor names that would accept ``url`` under ``spec``.
-
-    Built from the real registry. ``extract_info`` is not usable here:
-    once an extractor matches it issues actual HTTP requests, and this
-    test has to stay offline.
-    """
+def _enabled_extractors(spec: list[str]) -> list[Any]:
+    """The extractor instances ``spec`` leaves enabled, in order."""
     ydl = yt_dlp.YoutubeDL(
         {"allowed_extractors": spec, "quiet": True, "no_warnings": True}
     )
@@ -226,11 +221,26 @@ def _extractors_matching(spec: list[str], url: str) -> list[str]:
             "matrix cannot be checked; this test needs rewriting against "
             "whatever replaced it"
         )
-    return [
-        ie.IE_NAME
-        for ie in ydl._ies.values()
-        if ie.IE_NAME != "generic" and ie.suitable(url)
-    ]
+    return list(ydl._ies.values())
+
+
+def _extractors_matching(spec: list[str], url: str) -> list[str]:
+    """Every extractor name that would accept ``url`` under ``spec``.
+
+    Built from the real registry. ``extract_info`` is not usable here:
+    once an extractor matches it issues actual HTTP requests, and this
+    test has to stay offline.
+
+    ``generic`` is **not** filtered out. An earlier version did, on the
+    grounds that it matches almost any URL, and that quietly defeated
+    the rejection matrix: with a pin of ``["youtube.*", "generic"]``,
+    the malicious-authority URL and the link-local metadata address
+    both match ``generic`` and the filtered helper returned ``[]``, so
+    every rejection passed. The pin not enabling ``generic`` in the
+    first place is checked separately, as its own assertion rather than
+    as a silent assumption inside a helper.
+    """
+    return [ie.IE_NAME for ie in _enabled_extractors(spec) if ie.suitable(url)]
 
 
 def _expected_ejs_version() -> str:
@@ -323,6 +333,40 @@ class TestTheExtractorPinHolds:
         assert profile["extractor_spec"], (
             "an empty extractor spec falls back to GenericIE, which "
             "follows off-site redirects"
+        )
+
+    def test_the_pin_does_not_enable_the_generic_extractor(
+        self, profile: dict[str, Any]
+    ) -> None:
+        # C1 exists to keep extraction off GenericIE, so a pin that
+        # enables it defeats the invariant no matter how precise the
+        # rest of the pin is. Checked by name against the real
+        # registry, because a spec entry can enable it without the
+        # string "generic" appearing in the profile.
+        enabled = [ie.IE_NAME for ie in _enabled_extractors(profile["extractor_spec"])]
+        assert "generic" not in enabled, (
+            f"{profile['extractor_spec']} leaves the generic extractor "
+            "enabled, so a URL no YouTube extractor claims is still "
+            "fetched, and off-site redirects are followed"
+        )
+
+    def test_the_rejection_matrix_can_actually_fail(
+        self, profile: dict[str, Any]
+    ) -> None:
+        # A guard on the check above rather than on the repository: it
+        # proves the matrix is sensitive to generic being enabled, so
+        # that a helper filtering generic back out cannot pass
+        # unnoticed. If this ever stops holding, the rejections below
+        # are no longer evidence of anything.
+        rejections = profile["rejects_urls"]
+        if not rejections:
+            pytest.skip("profile declares no rejections")
+        with_generic = [*profile["extractor_spec"], "generic"]
+        caught = [url for url in rejections if _extractors_matching(with_generic, url)]
+        assert caught, (
+            "no declared rejection matches anything even with generic "
+            "enabled, so the rejection matrix cannot fail and is not "
+            "testing the pin"
         )
 
     def test_every_call_site_passes_the_declared_pin(
