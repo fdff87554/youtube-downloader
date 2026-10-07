@@ -53,6 +53,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Run backend tests
         run: cd backend && python -m pytest tests/ -v
+      # Layers 1 and 2 of the yt-dlp conformance drift control (see
+      # docs/ytdlp-invariants.md): the copied test's canonical region still
+      # hashes to what backend/pyproject.toml records, and no more items
+      # carry an xfail marker than xfail_budget allows. Offline, and it
+      # fails the build -- unlike conformance-report below, which is about
+      # another repository's state and only reports.
+      #
+      # It runs after the suite rather than before it, because a failure
+      # here is about the shared contract and is easier to read once the
+      # repository's own tests have had their say.
+      - name: Check yt-dlp conformance drift
+        run: |
+          bash docs/ytdlp-conformance/check-conformance-drift.sh \
+            backend/tests/test_ytdlp_conformance.py backend/pyproject.toml
       # Signal handling in the entrypoint, with uvicorn and nginx stubbed
       # out. Needs no image, so it belongs here rather than in
       # docker-build.
