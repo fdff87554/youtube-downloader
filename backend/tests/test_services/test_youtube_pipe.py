@@ -604,11 +604,13 @@ class TestProgressiveFallbackThroughTheRemux:
     ) -> None:
         source = _progressive_mp4(tmp_path / "tail.mp4", moov_first=False)
 
-        with (
-            _video_sources(_cat(source), _cat(source)),
-            pytest.raises(YouTubeError, match="ffmpeg failed"),
-        ):
-            b"".join(stream_download("https://www.youtube.com/watch?v=test", "mp4"))
+        with _video_sources(_cat(source), _cat(source)):
+            stream = stream_download("https://www.youtube.com/watch?v=test", "mp4")
+
+            with pytest.raises(YouTubeError) as excinfo:
+                next(stream)
+
+        _assert_carries_the_ffmpeg_reason(str(excinfo.value))
 
 
 @needs_ffmpeg
