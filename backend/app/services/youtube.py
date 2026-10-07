@@ -759,6 +759,39 @@ def _neutralize_control_chars(text: str) -> str:
     )
 
 
+class _YtDlpLogger:
+    """Routes yt-dlp's Python-API output into this module's logger.
+
+    The subprocess path gets this for free: its warnings reach stderr and
+    ``_drain_stderr`` forwards them. ``/api/info`` and the playlist path use
+    ``yt_dlp.YoutubeDL`` instead, which writes to stderr itself unless given
+    a logger -- so dropping ``no_warnings`` there without this would send
+    warnings around the structured logger rather than through it (#111).
+
+    yt-dlp calls ``debug`` for both debug and info output, marking the
+    former with a leading ``[debug] ``. Text is neutralised for the same
+    reason as on the stderr path: it quotes remote-controlled titles.
+    """
+
+    def __init__(self, target: logging.Logger) -> None:
+        self._log = target
+
+    def debug(self, msg: str) -> None:
+        if msg.startswith("[debug] "):
+            self._log.debug("yt-dlp: %s", _neutralize_control_chars(msg))
+        else:
+            self._log.info("yt-dlp: %s", _neutralize_control_chars(msg))
+
+    def info(self, msg: str) -> None:
+        self._log.info("yt-dlp: %s", _neutralize_control_chars(msg))
+
+    def warning(self, msg: str) -> None:
+        self._log.warning("yt-dlp: %s", _neutralize_control_chars(msg))
+
+    def error(self, msg: str) -> None:
+        self._log.error("yt-dlp: %s", _neutralize_control_chars(msg))
+
+
 def _drain_stderr(name: str, stream: IO[bytes], tail: deque[str]) -> None:
     """Forward subprocess stderr lines to the logger, keeping the tail.
 
@@ -980,8 +1013,14 @@ _YTDLP_BASE_ARGS = (
     "--use-extractors",
     ",".join(ALLOWED_EXTRACTORS),
     "--no-playlist",
+    # --quiet without --no-warnings: progress and the file listing stay off
+    # stderr (they would drown the drainer), but warnings get through. Before
+    # #110 every extraction in the container reported "Signature solving
+    # failed" and "n challenge solving failed" and none of it reached
+    # `docker compose logs`, so the service could say it was degraded and
+    # nobody could hear it (#111). _drain_stderr already routes these to the
+    # logger.
     "--quiet",
-    "--no-warnings",
     "--no-cache-dir",
     "--socket-timeout",
     str(SOCKET_TIMEOUT),
@@ -1020,8 +1059,10 @@ def _resolve_video_format(quality: str) -> str:
 
 def _base_opts() -> dict[str, Any]:
     return {
+        # quiet but not no_warnings, and a logger so the warnings land in the
+        # structured log instead of on stderr -- see _YtDlpLogger and #111.
         "quiet": True,
-        "no_warnings": True,
+        "logger": _YtDlpLogger(logger),
         "socket_timeout": SOCKET_TIMEOUT,
         "allowed_extractors": list(ALLOWED_EXTRACTORS),
         # Disable yt-dlp's player JS cache so the service writes nothing
