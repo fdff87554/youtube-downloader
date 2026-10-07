@@ -62,12 +62,55 @@ REQUIRED_PROFILE_KEYS = frozenset(
     }
 )
 OPTIONAL_PROFILE_KEYS = frozenset({"waivers"})
-INVARIANT_IDS = frozenset(f"C{n}" for n in range(1, 11))
-# The invariants this file checks mechanically, each the INVARIANT tag
-# of one test class below. Anything in INVARIANT_IDS and not here has
-# to be waived explicitly, which is what stops "no test" from reading
-# the same as "passing".
-COVERED_INVARIANTS = frozenset({"C1", "C2", "C3", "C4", "C6", "C7", "C8", "C9", "C10"})
+
+# Every aspect the spec defines. C7 and C8 are not single checks -- a
+# ceiling that holds on one downloader path is not a ceiling -- so they
+# are accounted for in parts, and the rest are single aspects under
+# their bare ID.
+SPEC_ASPECTS = frozenset(
+    {
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "C6",
+        "C7.selectable",
+        "C7.metered",
+        "C7.landed",
+        "C8.socket",
+        "C8.retries",
+        "C8.deadline",
+        "C9",
+        "C10",
+    }
+)
+
+# What this file checks mechanically. Anything in SPEC_ASPECTS and not
+# here has to be waived explicitly, which is what stops "no test" from
+# reading the same as "passing". Three are absent on purpose and are
+# expected to be waived by every repository:
+#
+#   C5           error-message content is not visible through the adapter
+#   C7.landed    a streaming repository lands no file, and one that does
+#                exposes no hook for a shared test to inspect
+#   C8.deadline  none of the three has a wall-clock bound, and a shared
+#                test cannot invent the mechanism it would check
+COVERED_ASPECTS = frozenset(
+    {
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C6",
+        "C7.selectable",
+        "C7.metered",
+        "C8.socket",
+        "C8.retries",
+        "C9",
+        "C10",
+    }
+)
 
 # yt-dlp declares the yt-dlp-ejs version it expects in an extra. Which
 # extra has changed between releases, so both spellings are accepted;
@@ -319,21 +362,65 @@ def waivers(profile: dict[str, Any]) -> dict[str, str]:
     return profile.get("waivers", {})
 
 
+# Which aspect each test stands for. Kept in one place rather than
+# spread over decorators so that the mapping is reviewable as a whole,
+# and so that an aspect listed as covered with no test behind it fails
+# a test of its own below. Tests not listed here are about the profile
+# or the mechanism rather than an invariant, and always run.
+ASPECT_OF_TEST = {
+    "test_the_pin_is_present_and_not_empty": "C1",
+    "test_the_pin_does_not_enable_the_generic_extractor": "C1",
+    "test_the_rejection_matrix_can_actually_fail": "C1",
+    "test_every_call_site_passes_the_declared_pin": "C1",
+    "test_every_declared_acceptance_is_real": "C1",
+    "test_every_declared_rejection_is_real": "C1",
+    "test_the_coupling_is_declared_one_way_or_the_other": "C2",
+    "test_the_solvers_match_the_installed_yt_dlp": "C2",
+    "test_absent_is_asserted_in_reverse": "C2",
+    "test_the_declaration_is_internally_consistent": "C3",
+    "test_a_host_provided_runtime_is_actually_present": "C3",
+    "test_no_vector_survives": "C4",
+    "test_neutralising_keeps_the_legible_text": "C4",
+    "test_an_accepted_url_survives_the_rebuild": "C6",
+    "test_a_rejected_url_reaches_no_extractor": "C6",
+    "test_the_ceiling_is_a_positive_number": "C7.metered",
+    "test_every_downloading_site_rejects_unmeterable_formats": "C7.selectable",
+    "test_no_downloading_selector_falls_back_to_an_unmeterable_format": "C7.selectable",
+    "test_every_in_process_downloading_site_meters_mid_transfer": "C7.metered",
+    "test_a_metering_hook_lets_a_transfer_within_the_ceiling_through": "C7.metered",
+    "test_the_declared_timeout_is_positive": "C8.socket",
+    "test_every_call_site_sets_the_declared_timeout": "C8.socket",
+    "test_every_in_process_downloading_site_sets_retries_explicitly": "C8.retries",
+    "test_no_call_site_disables_extraction_retry": "C8.retries",
+    "test_every_in_process_site_supplies_a_logger": "C9",
+    "test_no_call_site_silences_warnings": "C9",
+    "test_any_marker_coupling_names_the_version_it_was_checked_against": "C10",
+}
+
+
 @pytest.fixture(autouse=True)
 def _honour_waivers(request: pytest.FixtureRequest, waivers: dict[str, str]) -> None:
-    """Skip a waived invariant's tests, loudly and by name.
+    """Skip the tests of a waived aspect, by name and with the reason."""
+    aspect = ASPECT_OF_TEST.get(request.function.__name__)
+    if aspect is not None:
+        _require_not_waived(waivers, aspect)
+
+
+def _require_not_waived(waivers: dict[str, str], aspect: str) -> None:
+    """Skip when ``aspect`` is waived, loudly and by name.
 
     A waiver is the visible, countable alternative to deleting a test:
     it still has to cite an issue, it still shows up in the profile,
     and the reason travels into the test report rather than leaving a
     silent gap.
+
+    Called explicitly at the top of each test rather than applied by an
+    autouse fixture off a class attribute, because the gate is
+    per-aspect while C7 and C8 each span several in one class.
     """
-    invariant = getattr(request.cls, "INVARIANT", None)
-    if invariant is None:
-        return
-    reason = waivers.get(invariant)
+    reason = waivers.get(aspect)
     if reason is not None:
-        pytest.skip(f"{invariant} waived: {reason}")
+        pytest.skip(f"{aspect} waived: {reason}")
 
 
 @pytest.fixture(scope="session")
@@ -433,30 +520,46 @@ class TestTheProfileIsComplete:
         unknown = sorted(profile.keys() - allowed)
         assert not unknown, f"profile declares unknown keys {unknown}"
 
-    def test_each_waiver_names_an_invariant_and_an_issue(
+    def test_each_waiver_names_an_aspect_and_an_issue(
         self, waivers: dict[str, str]
     ) -> None:
         # A waiver is the visible, countable alternative to omitting a
         # test. One that names neither the invariant nor a ticket is an
         # omission with extra steps.
-        for invariant, reason in waivers.items():
-            assert invariant in INVARIANT_IDS, (
-                f"waiver key {invariant!r} is not an invariant ID"
+        for aspect, reason in waivers.items():
+            assert aspect in SPEC_ASPECTS, (
+                f"waiver key {aspect!r} is not an aspect the spec defines; "
+                f"it has to be one of {sorted(SPEC_ASPECTS)}"
             )
-            assert "#" in reason, f"waiver for {invariant} cites no issue: {reason!r}"
+            assert "#" in reason, f"waiver for {aspect} cites no issue: {reason!r}"
 
 
-class TestEveryInvariantIsAccountedFor:
+class TestEveryAspectIsAccountedFor:
     def test_nothing_is_silently_uncovered(self, waivers: dict[str, str]) -> None:
-        # The spec's rule, made mechanical: an invariant with no test
-        # and no waiver is a failure, not a gap. C5 has no test here
-        # (error-message content is not visible through the adapter),
-        # so every repository has to waive it deliberately.
-        unaccounted = sorted(INVARIANT_IDS - COVERED_INVARIANTS - waivers.keys())
+        # The spec's rule, made mechanical: an aspect with no test and
+        # no waiver is a failure, not a gap. Accounting at aspect
+        # granularity is what stops a partial check from clearing a
+        # whole invariant -- C7 used to count as covered by a check
+        # that only asserted a positive ceiling and a present hook.
+        unaccounted = sorted(SPEC_ASPECTS - COVERED_ASPECTS - waivers.keys())
         assert not unaccounted, (
             f"{unaccounted} have neither a test in this file nor a waiver "
             "in the profile"
         )
+
+    def test_every_covered_aspect_has_a_test_behind_it(self) -> None:
+        # Guards the claim COVERED_ASPECTS makes. Without this, adding
+        # an aspect to that set is enough to stop anyone having to
+        # waive it, which is the same overstatement in a new place.
+        claimed = COVERED_ASPECTS - set(ASPECT_OF_TEST.values())
+        assert not claimed, (
+            f"{sorted(claimed)} are listed as covered but no test in "
+            "ASPECT_OF_TEST stands for them"
+        )
+
+    def test_no_test_claims_an_unknown_aspect(self) -> None:
+        unknown = sorted(set(ASPECT_OF_TEST.values()) - SPEC_ASPECTS)
+        assert not unknown, f"ASPECT_OF_TEST names aspects the spec does not: {unknown}"
 
 
 class TestTheSpecVersionIsCoupled:
@@ -469,8 +572,6 @@ class TestTheSpecVersionIsCoupled:
 
 
 class TestTheExtractorPinHolds:
-    INVARIANT = "C1"
-
     def test_the_pin_is_present_and_not_empty(self, profile: dict[str, Any]) -> None:
         assert profile["extractor_spec"], (
             "an empty extractor spec falls back to GenericIE, which "
@@ -552,8 +653,6 @@ class TestTheExtractorPinHolds:
 
 
 class TestTheChallengeSolversMatch:
-    INVARIANT = "C2"
-
     def test_the_coupling_is_declared_one_way_or_the_other(
         self, profile: dict[str, Any]
     ) -> None:
@@ -580,8 +679,6 @@ class TestTheChallengeSolversMatch:
 
 
 class TestTheJsRuntimeIsDeclared:
-    INVARIANT = "C3"
-
     def test_the_declaration_is_internally_consistent(
         self, profile: dict[str, Any]
     ) -> None:
@@ -611,8 +708,6 @@ class TestTheJsRuntimeIsDeclared:
 
 
 class TestControlCharactersAreNeutralised:
-    INVARIANT = "C4"
-
     def test_no_vector_survives(self, ytdlp_subject: Any) -> None:
         for vector in CONTROL_CHARACTER_VECTORS:
             cleaned = ytdlp_subject.neutralize(f"title{vector}INJECTED")
@@ -629,8 +724,6 @@ class TestControlCharactersAreNeutralised:
 
 
 class TestUrlsAreCanonicalisedBeforeYtDlp:
-    INVARIANT = "C6"
-
     def test_an_accepted_url_survives_the_rebuild(
         self, profile: dict[str, Any], ytdlp_subject: Any
     ) -> None:
@@ -668,8 +761,6 @@ class TestUrlsAreCanonicalisedBeforeYtDlp:
 
 
 class TestTheByteCeilingIsDeclaredAndReachable:
-    INVARIANT = "C7"
-
     def test_the_ceiling_is_a_positive_number(self, profile: dict[str, Any]) -> None:
         assert profile["max_bytes"] > 0
 
@@ -734,27 +825,68 @@ class TestTheByteCeilingIsDeclaredAndReachable:
                 )
 
     def test_every_in_process_downloading_site_meters_mid_transfer(
-        self, call_sites: list[CallSite]
+        self, profile: dict[str, Any], call_sites: list[CallSite]
     ) -> None:
-        # Layer 2, and only for sites that actually download.
+        # C7.metered, and only for sites that actually download.
         # max_filesize is not a ceiling: downloader/http.py consults it
         # once, before the transfer, only when Content-Length is known,
         # and returns False rather than raising.
+        #
+        # The hooks are driven rather than counted. Asserting that
+        # progress_hooks is non-empty passes for a hook that does
+        # nothing, which is the same gap one level further in.
         sites = _in_process(_sites_for(call_sites, DOWNLOAD))
         if not sites:
             pytest.skip("no in-process downloading site to check")
+        ceiling = profile["max_bytes"]
         for site in sites:
             assert site.options is not None
-            assert site.options.get("progress_hooks"), (
+            hooks = site.options.get("progress_hooks")
+            assert hooks, (
                 f"{site.name} has no progress_hooks, so nothing observes "
                 "the transfer while it runs and max_filesize alone is not "
                 "a ceiling"
             )
+            status = {
+                "status": "downloading",
+                "filename": "conformance.part",
+                "downloaded_bytes": ceiling + 1,
+                "total_bytes": ceiling + 1,
+            }
+            for hook in hooks:
+                with pytest.raises(Exception) as raised:
+                    hook(dict(status))
+                # Any exception type: each repository raises its own,
+                # and a shared test has no business naming it. What
+                # matters is that the transfer does not continue.
+                assert not isinstance(raised.value, AssertionError), (
+                    f"{site.name}'s progress hook failed an assertion of "
+                    "its own rather than stopping the transfer"
+                )
+
+    def test_a_metering_hook_lets_a_transfer_within_the_ceiling_through(
+        self, profile: dict[str, Any], call_sites: list[CallSite]
+    ) -> None:
+        # The other side of it. A hook that raises on everything would
+        # pass the test above and break every download.
+        sites = _in_process(_sites_for(call_sites, DOWNLOAD))
+        if not sites:
+            pytest.skip("no in-process downloading site to check")
+        ceiling = profile["max_bytes"]
+        for site in sites:
+            assert site.options is not None
+            for hook in site.options.get("progress_hooks") or ():
+                hook(
+                    {
+                        "status": "downloading",
+                        "filename": "conformance.part",
+                        "downloaded_bytes": max(ceiling - 1, 0),
+                        "total_bytes": ceiling,
+                    }
+                )
 
 
 class TestTheTimeBoundIsExplicit:
-    INVARIANT = "C8"
-
     def test_the_declared_timeout_is_positive(self, profile: dict[str, Any]) -> None:
         assert profile["socket_timeout_seconds"] > 0
 
@@ -824,8 +956,6 @@ class TestTheTimeBoundIsExplicit:
 
 
 class TestYtDlpOutputIsCaptured:
-    INVARIANT = "C9"
-
     def test_every_in_process_site_supplies_a_logger(
         self, call_sites: list[CallSite]
     ) -> None:
@@ -852,8 +982,6 @@ class TestYtDlpOutputIsCaptured:
 
 
 class TestErrorTextCouplingIsPinned:
-    INVARIANT = "C10"
-
     def test_any_marker_coupling_names_the_version_it_was_checked_against(
         self, profile: dict[str, Any]
     ) -> None:
