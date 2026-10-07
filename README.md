@@ -168,6 +168,15 @@ pre-commit run --all-files
 Hooks cover Python (`ruff`), YAML (`yamlfmt`), shell scripts (`shfmt`,
 `shellcheck`), and Markdown/JSON (`prettier`, `markdownlint-cli2`).
 
+### yt-dlp integration invariants
+
+This project shares a set of yt-dlp invariants with two sibling
+projects, Whisper-UI and voice-forge. The canonical spec lives at
+[`docs/ytdlp-invariants.md`](docs/ytdlp-invariants.md): what must hold
+in all three, what is allowed to differ and why, the measurements behind
+each decision, and the alternatives that were evaluated and rejected.
+Read it before changing anything under `backend/app/services/`.
+
 ## API reference
 
 Interactive Swagger UI is available at `/api/docs` when the server is
