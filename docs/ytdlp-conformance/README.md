@@ -19,6 +19,10 @@ the adapter described below.
 - `check-conformance-drift.sh` is copied as-is and run from the
   repository root in CI.
 
+`report-sibling-profiles.sh` is **not** copied. It runs only in this
+repository, which is the canonical home; see
+[Drift control](#drift-control) below.
+
 Drop the `.example` suffix on the first one. Keep its name
 `test_ytdlp_conformance.py`, because the drift check looks for it.
 
@@ -129,6 +133,21 @@ bash check-conformance-drift.sh tests/test_ytdlp_conformance.py pyproject.toml
 ```
 
 Both arguments are optional and default to those values.
+
+The third layer runs only here: `report-sibling-profiles.sh` reads each
+public sibling's declared `spec_version` and `canonical_region_sha256`
+through the GitHub API and prints them into the job summary. It is
+report-only and the job sets `continue-on-error`, because a pull request
+in one repository should not be blocked by another's state. A repository
+that has not adopted the spec reports as `not declared` rather than
+failing the step -- a check that goes red for a reason nobody can act on
+is a check people learn to ignore.
+
+It covers this repository and Whisper-UI, and not voice-forge, which is
+private: reading it from a public repository's CI would mean holding a
+credential with read access to a private repository. voice-forge runs
+the first two layers in its own CI, which are the stronger two. The gap
+is written down in the spec so that it stays countable.
 
 ## What this test does not cover
 

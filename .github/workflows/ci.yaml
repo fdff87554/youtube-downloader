@@ -98,6 +98,30 @@ jobs:
           pip install pip-audit
           python -m pip_audit -r backend/requirements.lock --strict
           python -m pip_audit -r backend/requirements-dev.lock --strict
+  # Layer 3 of the yt-dlp conformance drift control (see
+  # docs/ytdlp-invariants.md). Report-only, and continue-on-error so that it
+  # cannot fail a pull request here: a change in this repository should not be
+  # blocked by another repository's state. The value is that every run prints
+  # those lines, so a sibling stuck on an older spec version is visible rather
+  # than merely discoverable.
+  #
+  # It covers this repository and Whisper-UI. voice-forge is private, and
+  # reading it from here would mean this public repository's CI holding a
+  # credential with read access to a private one -- the wrong trade against
+  # least privilege. voice-forge runs layers 1 and 2 in its own CI, which are
+  # the stronger two; the gap is written down in the spec so that it stays
+  # countable rather than forgotten.
+  conformance-report:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Report the conformance profile of each public sibling
+        env:
+          # The built-in token. It reads public repositories and nothing else,
+          # which is exactly the scope this step needs.
+          GH_TOKEN: ${{ github.token }}
+        run: bash docs/ytdlp-conformance/report-sibling-profiles.sh
   docker-build:
     runs-on: ubuntu-latest
     steps:
