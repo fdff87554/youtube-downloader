@@ -260,30 +260,15 @@ CONFORMANCE_XFAILS = {
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """Mark the known conformance gaps, and fail if one goes stale.
+    """Mark the known conformance gaps.
 
-    A node id that no longer matches anything is a stale entry: the
-    test it excused was renamed or deleted, and leaving it behind
-    means the budget reserves room for a gap nobody can close.
-
-    Only entries whose module was collected are judged, or every
-    targeted run -- ``pytest tests/test_health.py`` -- would fail for
-    not having collected the conformance module.
+    Marking only. Whether an entry still names a real test is checked
+    in ``test_conformance_registry.py``, which resolves the names
+    against the module instead of against whatever this run happened
+    to collect -- a check that reads the collection cannot tell a
+    renamed test from a narrowed selection.
     """
-    collected_modules = {item.nodeid.split("::", 1)[0] for item in items}
-    unmatched = {
-        nodeid
-        for nodeid in CONFORMANCE_XFAILS
-        if nodeid.split("::", 1)[0] in collected_modules
-    }
     for item in items:
         reason = CONFORMANCE_XFAILS.get(item.nodeid)
-        if reason is None:
-            continue
-        unmatched.discard(item.nodeid)
-        item.add_marker(pytest.mark.xfail(reason=reason, strict=True))
-    if unmatched:
-        raise pytest.UsageError(
-            "conformance xfail entries match no collected test: "
-            + ", ".join(sorted(unmatched))
-        )
+        if reason is not None:
+            item.add_marker(pytest.mark.xfail(reason=reason, strict=True))
