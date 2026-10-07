@@ -550,21 +550,49 @@ class TestTheTimeBoundIsExplicit:
                     f"the declared {expected}"
                 )
 
-    def test_every_in_process_site_sets_retries_explicitly(
+    def test_every_in_process_downloading_site_sets_retries_explicitly(
         self, call_sites: list[CallSite]
     ) -> None:
-        # retries defaults to 10 only in the CLI option parser
-        # (options.py:1025). A directly constructed YoutubeDL gets
-        # None, which utils/_utils.py:5267 turns into 0, so one
-        # transient HTTP failure fails the whole call. The subprocess
-        # sites get the CLI default and are not checked for it.
-        for site in _in_process(call_sites):
+        # Download sites only. retries and fragment_retries govern the
+        # media transfer (downloader/http.py:360) and default to 10
+        # only in the CLI option parser (options.py:1025); a directly
+        # constructed YoutubeDL gets None, which utils/_utils.py:5267
+        # turns into 0, so one transient failure fails that download.
+        #
+        # Extraction is a different budget and is not checked here:
+        # extractor_retries defaults to 3 (extractor/common.py:4072),
+        # which the YouTube extractor uses in youtube/_base.py:981 and
+        # :1287-1289, so an extract-only site that sets nothing still
+        # gets four attempts. Requiring retries there would be
+        # asserting a defect that is not present. The subprocess sites
+        # get the CLI default and are not checked either.
+        sites = _in_process(_sites_for(call_sites, DOWNLOAD))
+        if not sites:
+            pytest.skip("no in-process downloading site to check")
+        for site in sites:
             assert site.options is not None
             for key in ("retries", "fragment_retries"):
                 assert site.options.get(key) is not None, (
                     f"{site.name} leaves {key} unset, which means 0 on the "
                     "Python API path, not the CLI's 10"
                 )
+
+    def test_no_call_site_disables_extraction_retry(
+        self, call_sites: list[CallSite]
+    ) -> None:
+        # The converse of the above, and the only retry requirement
+        # that applies to extraction: extractor_retries is 3 unless
+        # someone sets it, and setting it to 0 silently removes a retry
+        # that was there by default.
+        for site in _in_process(call_sites):
+            assert site.options is not None
+            configured = site.options.get("extractor_retries")
+            if configured is None:
+                continue
+            assert configured > 0, (
+                f"{site.name} sets extractor_retries={configured!r}, which "
+                "removes the retry extraction has by default"
+            )
 
 
 class TestYtDlpOutputIsCaptured:
