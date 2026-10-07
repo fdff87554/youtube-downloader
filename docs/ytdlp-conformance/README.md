@@ -145,15 +145,41 @@ Two keys need a word of warning:
 It checks two things, both offline:
 
 - the canonical region still hashes to `canonical_region_sha256`;
-- the number of `pytest.mark.xfail` markers is within `xfail_budget`.
+- no more collected items carry an `xfail` marker than `xfail_budget`
+  allows, counted by asking pytest:
+  `pytest <test> -m xfail --collect-only -q`.
 
-Add it as a CI step next to the test run:
+Add it as a CI step next to the test run, with the project's test
+environment active:
 
 ```bash
 bash check-conformance-drift.sh tests/test_ytdlp_conformance.py pyproject.toml
 ```
 
 Both arguments are optional and default to those values.
+
+**The budget is counted by pytest, and from outside the test module, on
+purpose.** A text scan cannot see what pytest sees, and the gap is
+exploitable with ordinary pytest: two lines outside the hashed region --
+
+```python
+from pytest import mark
+
+pytestmark = mark.xfail(strict=False, reason="...")
+```
+
+-- turn every test in the module into an `xfail`. An earlier version
+grepped for `pytest.mark.xfail`, reported `0/0 xfail` and exited 0 while
+pytest reported `3 skipped, 4 xfailed, 21 xpassed`. Putting the count in
+a test inside the conformance module does not fix it either: those same
+two lines mark that test too, so its failure is reported as an `xfail`
+and the run stays green. A check cannot police the module it lives in.
+
+Verified against the three routes a marker can arrive by -- an explicit
+decorator, an aliased module-level `pytestmark`, and
+`pytest_collection_modifyitems` in a `conftest.py` -- plus a
+non-integer budget, which an earlier version reported as a shell error
+and then exited 0 on.
 
 The third layer runs only here: `report-sibling-profiles.sh` reads each
 public sibling's declared `spec_version` and `canonical_region_sha256`

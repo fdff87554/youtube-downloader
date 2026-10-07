@@ -1,18 +1,39 @@
 #!/usr/bin/env bash
-# Drift control for the copied yt-dlp conformance test.
+# Drift control for the copied yt-dlp conformance test: the canonical
+# region still hashes to the value recorded in
+# [tool.ytdlp_conformance].canonical_region_sha256.
 #
-# Two checks, both local and both offline:
+# The region is hashed rather than the whole file because additions
+# below the end sentinel are legitimate, and a check that cries wolf
+# teaches people to ignore it. Both sentinels are inside the hashed
+# span, so moving one is itself drift.
 #
-#   1. The canonical region of the copied test still hashes to the
-#      value recorded in [tool.ytdlp_conformance].canonical_region_sha256.
-#      The region is hashed rather than the whole file because additions
-#      below the end sentinel are legitimate, and a check that cries
-#      wolf teaches people to ignore it.
-#   2. The number of xfail markers in the copied test is within
-#      xfail_budget. The xfail list is the backlog and may only shrink.
+# It also checks the xfail budget, by asking pytest which collected
+# items carry the marker:
 #
-# Copy this next to the test and run it from the repository root in CI.
-# Spec: docs/ytdlp-invariants.md in fdff87554/youtube-downloader.
+#     pytest <test> -m xfail --collect-only -q
+#
+# Not by reading the file. A text scan cannot see what pytest sees, and
+# the gap is exploitable with ordinary pytest: two lines outside the
+# hashed region --
+#
+#     from pytest import mark
+#     pytestmark = mark.xfail(strict=False, reason="...")
+#
+# -- turn every test in the module into an xfail. Measured against an
+# earlier version that grepped for pytest.mark.xfail: it reported
+# "0/0 xfail" and exited 0 while pytest reported "3 skipped, 4 xfailed,
+# 21 xpassed". The whole suite was neutralised and the check called it
+# clean.
+#
+# The count is taken here rather than in a test inside the conformance
+# module, because the same two lines mark that test as well: its
+# failure is then reported as an xfail and the run stays green. A check
+# cannot police the module it lives in.
+#
+# Copy this next to the test and run it from the repository root in CI,
+# with the project's test environment active. Spec:
+# docs/ytdlp-invariants.md in fdff87554/youtube-downloader.
 #
 # Usage: check-conformance-drift.sh [test-path] [manifest-path]
 
@@ -46,7 +67,16 @@ if profile is None:
     sys.exit(f"{manifest} declares no [tool.ytdlp_conformance]")
 if key not in profile:
     sys.exit(f"{manifest} declares no {key}; every profile key is mandatory")
-print(profile[key])
+
+value = profile[key]
+if key == "xfail_budget":
+    # Checked before anything compares against it. An earlier version
+    # read it untyped, and `[ 0 -gt "oops" ]` printed an error to
+    # stderr and left the script exiting 0, so an unusable budget read
+    # as a passing one.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        sys.exit(f"{manifest}: xfail_budget is {value!r}, not a non-negative integer")
+print(value)
 PY
 }
 
@@ -80,21 +110,37 @@ MSG
 	)"
 fi
 
-# Matches the marker, not the word: "xfail_budget" appears in the
-# test's own list of profile keys, and a bare grep for xfail counted it.
-xfail_count="$(grep -cE 'pytest\.mark\.xfail|^[[:space:]]*@.*\bxfail\b' \
-	"$TEST_PATH" || true)"
+# pytest's own collection and marker resolution, so an aliased import,
+# a module-level pytestmark and a marker added from a conftest.py all
+# count. Exit 5 is "nothing collected", which here means nothing is
+# marked; anything else is a real failure and is reported as one.
+# The status is captured on the same line as the assignment: after an
+# `if !` the status in the branch is the negated test's, not pytest's.
+collect_status=0
+collect_output="$(
+	python3 -m pytest "$TEST_PATH" -m xfail --collect-only -q \
+		-p no:cacheprovider 2>&1
+)" || collect_status=$?
+
+# 0 means some items are marked, 5 means none were collected and so
+# none are marked. Anything else is a real failure and is reported.
+if [ "$collect_status" -ne 0 ] && [ "$collect_status" -ne 5 ]; then
+	printf '%s\n' "$collect_output" >&2
+	die "could not collect $TEST_PATH to count xfail markers (pytest exit $collect_status)"
+fi
+
+xfail_count="$(printf '%s\n' "$collect_output" | grep -c "^${TEST_PATH}::" || true)"
 
 if [ "$xfail_count" -gt "$xfail_budget" ]; then
 	die "$(
 		cat <<MSG
-$TEST_PATH holds $xfail_count xfail marker(s), over a budget of $xfail_budget.
-The xfail list is the backlog and may only shrink. Fix the invariant,
-or -- if the gap is genuinely accepted -- record a waiver in
-$MANIFEST instead, which has to cite an issue.
+$TEST_PATH holds $xfail_count xfailed item(s), over a budget of $xfail_budget.
+The list is the backlog and may only shrink. Fix the aspect, or -- if
+the gap is genuinely accepted -- waive it in $MANIFEST, which has to
+cite an issue, rather than raising the budget.
 MSG
 	)"
 fi
 
-printf 'conformance: region %s, %s/%s xfail\n' \
-	"${actual_hash:0:12}" "$xfail_count" "$xfail_budget"
+printf 'conformance: region %s matches %s, %s/%s xfailed\n' \
+	"${actual_hash:0:12}" "$TEST_PATH" "$xfail_count" "$xfail_budget"
