@@ -542,6 +542,28 @@ def _progressive_mp4(path: pathlib.Path, *, moov_first: bool) -> pathlib.Path:
     return path
 
 
+def _assert_carries_the_ffmpeg_reason(message: str) -> None:
+    """The failure has to say *why*, not just that a stage exited non-zero.
+
+    ``_raise_stage_failure`` builds its detail as
+    ``" | ".join(stderr_tail) or f"exited with code {returncode}"``, so a
+    stage run under ``-v quiet`` still raises "ffmpeg failed" -- with the
+    fallback string and no cause at all. The absence of that fallback is
+    therefore what guards ``-v error``.
+
+    **Deliberately not matching ffmpeg's wording.** The two stages fail
+    differently on the same input and the same ffmpeg: the mp3 one at demux
+    ("Invalid data found when processing input"), the remux one at header
+    write ("dimensions not set", "Could not write header"). Pinning either
+    string would not even generalise across the pair, let alone across the
+    7.0.2 used here and the 5.1.9 in the image.
+    """
+    assert "ffmpeg failed" in message
+    assert "exited with code" not in message, message
+    detail = message.split("ffmpeg failed:", 1)[1].strip()
+    assert detail, message
+
+
 def _audio_source(audio: list[str]):
     """Patch the mp3 path's single command: one yt-dlp handing over audio."""
     return patch("app.services.youtube._build_audio_command", return_value=audio)
@@ -618,11 +640,15 @@ class TestProgressiveFallbackThroughTheMp3Stage:
     ) -> None:
         source = _progressive_mp4(tmp_path / "tail-audio.mp4", moov_first=False)
 
-        with (
-            _audio_source(_cat(source)),
-            pytest.raises(YouTubeError, match="ffmpeg failed"),
-        ):
-            b"".join(stream_download("https://www.youtube.com/watch?v=test", "mp3"))
+        with _audio_source(_cat(source)):
+            stream = stream_download("https://www.youtube.com/watch?v=test", "mp3")
+
+            # next(), not join(): the router commits the 200 with the first
+            # chunk, so the failure has to arrive before any byte does.
+            with pytest.raises(YouTubeError) as excinfo:
+                next(stream)
+
+        _assert_carries_the_ffmpeg_reason(str(excinfo.value))
 
 
 class TestFailureBeforeTheFirstChunkIsSent:
