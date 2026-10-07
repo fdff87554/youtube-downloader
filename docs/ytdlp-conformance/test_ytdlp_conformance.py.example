@@ -148,11 +148,30 @@ _METERED_PROTOCOL_PREFIXES = ("http", "ftp")
 # default sort order, so it only breaks a tie. A pool of equal-quality
 # renditions shows https winning and invites the false conclusion that
 # an unconstrained selector is safe.
+# The unmeterable renditions carry the HIGHER bitrate on purpose: proto
+# sits after quality, tbr, filesize, vbr, height and width in yt-dlp's
+# default sort order, so it only breaks a tie. A pool of equal-quality
+# renditions shows https winning and invites the false conclusion that
+# an unconstrained selector is safe.
 _HIGH_TBR = 6000
 _LOW_TBR = 3000
 
+# Every height a repository here selects on, so that a tier-limited
+# selector finds something at its own tier instead of failing for want
+# of a format. 1080 doubles as the unbounded tier.
+_PROBE_HEIGHTS = (1080, 720, 480)
+_FORMAT_KINDS = ("video", "audio", "progressive")
 
-def _probe_format(format_id: str, protocol: str, kind: str, tbr: int) -> dict[str, Any]:
+# http and ftp pass through HttpFD or DashSegmentsFD, which count bytes
+# in Python. Anything yt-dlp hands to ffmpeg does not, and m3u8_native
+# hands the whole transfer over whenever HlsFD cannot handle the
+# manifest itself.
+_UNMETERED_PROBE_PROTOCOLS = ("m3u8_native", "m3u8")
+
+
+def _probe_format(
+    format_id: str, protocol: str, kind: str, tbr: int, height: int
+) -> dict[str, Any]:
     common = {
         "format_id": format_id,
         "protocol": protocol,
@@ -160,15 +179,6 @@ def _probe_format(format_id: str, protocol: str, kind: str, tbr: int) -> dict[st
         "tbr": tbr,
         "filesize": tbr * 1000,
     }
-    if kind == "video":
-        return common | {
-            "ext": "mp4",
-            "vcodec": "avc1.4d401f",
-            "acodec": "none",
-            "height": 1080,
-            "width": 1920,
-            "fps": 30,
-        }
     if kind == "audio":
         return common | {
             "ext": "m4a",
@@ -176,49 +186,53 @@ def _probe_format(format_id: str, protocol: str, kind: str, tbr: int) -> dict[st
             "acodec": "mp4a.40.2",
             "abr": tbr,
         }
-    return common | {
+    video = {
         "ext": "mp4",
         "vcodec": "avc1.4d401f",
-        "acodec": "mp4a.40.2",
-        "height": 1080,
-        "width": 1920,
+        "height": height,
+        "width": height * 16 // 9,
         "fps": 30,
     }
+    if kind == "video":
+        return common | video | {"acodec": "none"}
+    return common | video | {"acodec": "mp4a.40.2"}
 
 
-_FORMAT_KINDS = ("video", "audio", "progressive")
+def _pool(include_metered: bool) -> list[dict[str, Any]]:
+    """Renditions of every shape, at every height a tier selects on.
+
+    With ``include_metered`` false nothing meterable is on offer, which
+    is the only way to exercise a selector's fallback branches: a
+    selector whose first branch is constrained and whose fallback is
+    not matches on the first branch against a mixed pool, so the
+    fallback is never reached there.
+    """
+    pool = []
+    for kind in _FORMAT_KINDS:
+        heights = _PROBE_HEIGHTS if kind != "audio" else (0,)
+        for height in heights:
+            suffix = f"{kind}-{height}" if height else kind
+            if include_metered:
+                pool.append(
+                    _probe_format(f"http-{suffix}", "https", kind, _LOW_TBR, height)
+                )
+            for protocol in _UNMETERED_PROBE_PROTOCOLS:
+                pool.append(
+                    _probe_format(
+                        f"{protocol}-{suffix}", protocol, kind, _HIGH_TBR, height
+                    )
+                )
+    return pool
 
 
 def _mixed_pool() -> list[dict[str, Any]]:
-    """Meterable and unmeterable renditions of every shape.
-
-    Rich enough that a correctly constrained selector finds something,
-    so "no match" here means the selector could not be exercised
-    rather than that it is safe.
-    """
-    pool = []
-    for kind in _FORMAT_KINDS:
-        pool.append(_probe_format(f"http-{kind}", "https", kind, _LOW_TBR))
-        pool.append(_probe_format(f"hlsnative-{kind}", "m3u8_native", kind, _HIGH_TBR))
-        pool.append(_probe_format(f"hlsffmpeg-{kind}", "m3u8", kind, _HIGH_TBR))
-    return pool
+    """Meterable and unmeterable renditions, the unmeterable ones better."""
+    return _pool(include_metered=True)
 
 
 def _unmeterable_only_pool() -> list[dict[str, Any]]:
-    """Nothing meterable on offer, which is what exercises a fallback.
-
-    A selector like ``bestaudio[protocol^=http]/best`` passes against
-    the mixed pool: its first branch matches, so the unconstrained
-    second branch is never reached. Removing every meterable rendition
-    forces each later branch to be the one that selects, and a
-    correctly constrained selector then has to match *nothing* rather
-    than fall through to an unmeterable format.
-    """
-    pool = []
-    for kind in _FORMAT_KINDS:
-        pool.append(_probe_format(f"hlsnative-{kind}", "m3u8_native", kind, _HIGH_TBR))
-        pool.append(_probe_format(f"hlsffmpeg-{kind}", "m3u8", kind, _HIGH_TBR))
-    return pool
+    """Nothing meterable on offer, which is what exercises a fallback."""
+    return _pool(include_metered=False)
 
 
 def _selected_formats(
@@ -403,6 +417,7 @@ ASPECT_OF_TEST = {
     "test_every_downloading_site_rejects_unmeterable_formats": "C7.selectable",
     "test_no_downloading_selector_falls_back_to_an_unmeterable_format": "C7.selectable",
     "test_a_mixed_selection_is_judged_by_its_components": "C7.selectable",
+    "test_the_pool_can_exercise_a_height_limited_selector": "C7.selectable",
     "test_every_in_process_downloading_site_meters_mid_transfer": "C7.metered",
     "test_a_metering_hook_lets_a_transfer_within_the_ceiling_through": "C7.metered",
     "test_the_declared_timeout_is_positive": "C8.socket",
@@ -814,6 +829,27 @@ class TestTheByteCeilingIsDeclaredAndReachable:
                     "no Python-side downloader meters those protocols, so "
                     "the byte ceiling cannot hold on them"
                 )
+
+    def test_the_pool_can_exercise_a_height_limited_selector(self) -> None:
+        # A guard on the pool. It once held 1080p only, so a correctly
+        # constrained 720p or 480p selector matched nothing and was
+        # reported as a failure for want of a format rather than for
+        # anything it did. Any repository selecting on height would
+        # have been unable to pass.
+        for height in _PROBE_HEIGHTS:
+            selector = (
+                f"bestvideo[ext=mp4][height<={height}][protocol^=http]"
+                f"/best[ext=mp4][height<={height}][protocol^=http]"
+            )
+            chosen = _selected_formats(selector, None, _mixed_pool())
+            assert chosen, (
+                f"the pool offers nothing a {height}p selector can match, so "
+                "a tier-limited selector cannot be judged on its merits"
+            )
+            assert not _unmetered(chosen), (
+                f"a fully constrained {height}p selector picked "
+                f"{_unmetered(chosen)}, so the pool or the check is wrong"
+            )
 
     def test_a_mixed_selection_is_judged_by_its_components(self) -> None:
         # A guard on the checker, not on the repository. A video+audio
