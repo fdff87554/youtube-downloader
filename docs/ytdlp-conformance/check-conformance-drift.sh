@@ -8,14 +8,13 @@
 # teaches people to ignore it. Both sentinels are inside the hashed
 # span, so moving one is itself drift.
 #
-# It also checks the xfail budget, by asking pytest which collected
-# items carry the marker:
+# It also checks the xfail budget, by loading
+# conformance_xfail_plugin.py into a collect-only pytest run and
+# reading the count it writes. Neither the file's text nor pytest's
+# output is parsed, and both of those were tried:
 #
-#     pytest <test> -m xfail --collect-only -q
-#
-# Not by reading the file. A text scan cannot see what pytest sees, and
-# the gap is exploitable with ordinary pytest: two lines outside the
-# hashed region --
+# A text scan cannot see what pytest sees, and the gap is exploitable
+# with ordinary pytest: two lines outside the hashed region --
 #
 #     from pytest import mark
 #     pytestmark = mark.xfail(strict=False, reason="...")
@@ -31,9 +30,17 @@
 # failure is then reported as an xfail and the run stays green. A check
 # cannot police the module it lives in.
 #
-# Copy this next to the test and run it from the repository root in CI,
-# with the project's test environment active. Spec:
-# docs/ytdlp-invariants.md in fdff87554/youtube-downloader.
+# And it is taken from a plugin rather than from pytest's listing,
+# because parsing the listing made the answer depend on how the path
+# was spelled and how verbose pytest was. Measured on a module with 35
+# xfail items: a plain relative path reported all 35, while
+# ./tests/..., an absolute path, and the same path under
+# PYTEST_ADDOPTS=-q each reported 0 and exited 0.
+#
+# Copy this and conformance_xfail_plugin.py next to the test, and run
+# it from the repository root in CI with the project's test environment
+# active. Spec: docs/ytdlp-invariants.md in
+# fdff87554/youtube-downloader.
 #
 # Usage: check-conformance-drift.sh [test-path] [manifest-path]
 
@@ -41,6 +48,9 @@ set -euo pipefail
 
 TEST_PATH="${1:-tests/test_ytdlp_conformance.py}"
 MANIFEST="${2:-pyproject.toml}"
+
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT
 
 BEGIN_SENTINEL='# --- ytdlp-conformance:canonical-begin ---'
 END_SENTINEL='# --- ytdlp-conformance:canonical-end ---'
@@ -112,29 +122,46 @@ fi
 
 # pytest's own collection and marker resolution, so an aliased import,
 # a module-level pytestmark and a marker added from a conftest.py all
-# count. Exit 5 is "nothing collected", which here means nothing is
-# marked; anything else is a real failure and is reported as one.
-# The status is captured on the same line as the assignment: after an
-# `if !` the status in the branch is the negated test's, not pytest's.
+# count. The plugin lives beside this script; PYTHONPATH is extended
+# rather than replaced so the project's own imports still resolve.
+plugin_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+count_file="$workdir/xfail-count"
+
 collect_status=0
 collect_output="$(
-	python3 -m pytest "$TEST_PATH" -m xfail --collect-only -q \
+	PYTHONPATH="$plugin_dir${PYTHONPATH:+:$PYTHONPATH}" \
+		CONFORMANCE_XFAIL_COUNT_FILE="$count_file" \
+		python3 -m pytest "$TEST_PATH" --collect-only -p conformance_xfail_plugin \
 		-p no:cacheprovider 2>&1
 )" || collect_status=$?
 
-# 0 means some items are marked, 5 means none were collected and so
-# none are marked. Anything else is a real failure and is reported.
-if [ "$collect_status" -ne 0 ] && [ "$collect_status" -ne 5 ]; then
+# 0 means items were collected; 5 means none were, which for a
+# conformance module is itself wrong. Anything else is a real failure.
+if [ "$collect_status" -ne 0 ]; then
 	printf '%s\n' "$collect_output" >&2
 	die "could not collect $TEST_PATH to count xfail markers (pytest exit $collect_status)"
 fi
 
-xfail_count="$(printf '%s\n' "$collect_output" | grep -c "^${TEST_PATH}::" || true)"
+# The plugin writes the count on the first line and the marked node ids
+# after it. A missing file means the plugin never ran, which must not
+# read as a count of zero.
+if [ ! -f "$count_file" ]; then
+	printf '%s\n' "$collect_output" >&2
+	die "conformance_xfail_plugin did not run; it must be importable beside $0"
+fi
+
+xfail_count="$(head -n 1 "$count_file")"
+case "$xfail_count" in
+'' | *[!0-9]*)
+	die "conformance_xfail_plugin wrote '$xfail_count', which is not a count"
+	;;
+esac
 
 if [ "$xfail_count" -gt "$xfail_budget" ]; then
 	die "$(
 		cat <<MSG
-$TEST_PATH holds $xfail_count xfailed item(s), over a budget of $xfail_budget.
+$TEST_PATH holds $xfail_count xfailed item(s), over a budget of $xfail_budget:
+$(tail -n +2 "$count_file" | sed 's/^/  /')
 The list is the backlog and may only shrink. Fix the aspect, or -- if
 the gap is genuinely accepted -- waive it in $MANIFEST, which has to
 cite an issue, rather than raising the budget.
