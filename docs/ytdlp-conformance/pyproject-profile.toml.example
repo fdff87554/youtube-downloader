@@ -54,8 +54,8 @@ codec_policy = "h264-preferred"
 socket_timeout_seconds = 30
 
 # C7's ceiling, in bytes. There is no "no ceiling" value: a repository
-# that has not decided on one waives C7.metered and says why, rather
-# than writing a number it does not enforce.
+# that has not decided on one waives the C7 aspects it cannot meet and
+# says why, rather than writing a number it does not enforce.
 max_bytes = 4294967296
 
 # The runtime name, or "absent".
@@ -100,10 +100,15 @@ xfail_budget = 0
 # Three have to be here in every repository, because the shared test
 # cannot check them: C5 (error-message content is not visible through
 # the adapter), C7.landed (a streaming repository lands no file) and
-# C8.deadline (nothing here has a wall-clock bound). A waiver is not an
-# apology -- an aspect with no waiver and no test is a failure, and
-# these are how that rule stays satisfiable.
+# C8.deadline (nothing here has a wall-clock bound). A fourth,
+# C7.external, is required of any repository that downloads through a
+# subprocess, because a subprocess reports nothing back for a shared
+# test to measure.
+#
+# A waiver is not an apology -- an aspect with no waiver and no test is
+# a failure, and these are how that rule stays satisfiable.
 [tool.ytdlp_conformance.waivers]
 C5 = "error text is not reachable through the adapter; see #NNN"
 "C7.landed" = "media is streamed to the client and never lands; see #NNN"
+"C7.external" = "every download shells out to the yt-dlp CLI; see #NNN"
 "C8.deadline" = "no wall-clock bound on a streamed response; see #NNN"

@@ -80,6 +80,7 @@ SPEC_ASPECTS = frozenset(
         "C6",
         "C7.selectable",
         "C7.metered",
+        "C7.external",
         "C7.landed",
         "C8.socket",
         "C8.retries",
@@ -99,6 +100,11 @@ SPEC_ASPECTS = frozenset(
 #                exposes no hook for a shared test to inspect
 #   C8.deadline  none of the three has a wall-clock bound, and a shared
 #                test cannot invent the mechanism it would check
+#
+# C7.external is listed as covered, but what covers it is a test that
+# demands a waiver: a subprocess reports nothing back, so the only
+# honest outcome for a repository that downloads that way is a named
+# waiver with an issue behind it.
 COVERED_ASPECTS = frozenset(
     {
         "C1",
@@ -108,6 +114,7 @@ COVERED_ASPECTS = frozenset(
         "C6",
         "C7.selectable",
         "C7.metered",
+        "C7.external",
         "C8.socket",
         "C8.retries",
         "C9",
@@ -490,6 +497,7 @@ ASPECT_OF_TEST = {
     "test_the_pool_can_exercise_a_height_limited_selector": "C7.selectable",
     "test_every_in_process_downloading_site_meters_mid_transfer": "C7.metered",
     "test_a_metering_hook_lets_a_transfer_within_the_ceiling_through": "C7.metered",
+    "test_a_subprocess_download_declares_its_unverifiable_bound": "C7.external",
     "test_the_declared_timeout_is_positive": "C8.socket",
     "test_every_call_site_sets_the_declared_timeout": "C8.socket",
     "test_every_in_process_downloading_site_sets_retries_explicitly": "C8.retries",
@@ -1021,6 +1029,35 @@ class TestTheByteCeilingIsDeclaredAndReachable:
             assert raised is None, (
                 f"{site.name} stopped a transfer inside its ceiling: {raised!r}"
             )
+
+    def test_a_subprocess_download_declares_its_unverifiable_bound(
+        self, waivers: dict[str, str], call_sites: list[CallSite]
+    ) -> None:
+        # C7.external. A subprocess takes its options as argv and
+        # reports nothing back, so the shared test cannot watch the
+        # transfer or measure what landed. Before this existed, such a
+        # site made the C7.metered check skip while C7.metered still
+        # counted as covered -- so a repository whose every download
+        # shelled out had no byte bound anywhere and a green suite.
+        # Measured on a CLI-only adapter with no bound at all:
+        # 29 passed, 6 skipped.
+        #
+        # Deliberately not checked instead: --max-filesize in the argv.
+        # It is consulted once, pre-transfer, only with a known
+        # Content-Length, and returns False rather than raising, so
+        # asserting its presence would record conformance that is not
+        # there. A waiver records the gap instead.
+        external = [
+            site.name for site in _as_subprocess(_sites_for(call_sites, DOWNLOAD))
+        ]
+        if not external:
+            pytest.skip("every download is driven in-process")
+        assert "C7.external" in waivers, (
+            f"{external} download through a subprocess, whose byte bound no "
+            "shared test can observe. Waive C7.external with an issue "
+            "naming how the bound is enforced, or drive the download "
+            "in-process so C7.metered can check it."
+        )
 
 
 class TestTheTimeBoundIsExplicit:
