@@ -138,6 +138,17 @@ a repository that claims C7 with only `max_filesize` does not conform:
 
 2. Meter mid-transfer in a `progress_hooks` callback, keyed per output
    filename so the count survives a retry.
+
+   A repository may pass more than one hook, and yt-dlp hands them all
+   **one** status object: `downloader/common.py:488-495`, which says at
+   `:489-493` that the sharing is deliberate ("youtube-dl passes the
+   same status object to all the hooks ... So keep this behavior if
+   possible"). So the ceiling is a property of the set, not of any one
+   member -- a hook ahead of the guard that rewrites `downloaded_bytes`
+   disarms it, and a guard behind a plain observer is still a ceiling.
+   This is why the shared test drives the hooks as a set rather than
+   requiring each one to raise.
+
 3. Verify the landed file on disk and refuse to publish it when it is
    over the ceiling. A staging directory plus publish-after-validation
    is required: without it an oversized download still becomes cache.
@@ -369,8 +380,9 @@ previous commit; a recorded budget replaces that, because CI clones are
 shallow and a check that cannot run is not a check.
 
 **The budget is counted from pytest's collection, by a pytest plugin,
-and from outside the conformance module.** Each of those three is there
-because the simpler version failed:
+from outside the conformance module, and once collection has
+finished.** Each of those four is there because the simpler version
+failed:
 
 - _From the collection, not the file's text._ Two lines outside the
   hashed region --
@@ -398,6 +410,27 @@ because the simpler version failed:
   `PYTEST_ADDOPTS=-q` each reported `0/0` and exited 0. A plugin reads
   the collected items directly and writes a count, so neither spelling
   nor verbosity can reach it.
+
+- _Once collection has finished, not from
+  `pytest_collection_modifyitems`._ A `conftest.py` may add markers
+  from its own implementation of that hook, so counting there made the
+  answer depend on which implementation pluggy called first. Measured
+  on a module of 3 items marked from a `conftest.py`: a plain hook and
+  a `tryfirst` one were both counted, and a `trylast` one was not --
+  `0` against pytest's own `3 xpassed`. A plain conftest hook happens
+  to run first, because pluggy calls the last-registered
+  implementation first and a `conftest.py` is registered after a `-p`
+  plugin; that is why this held, and it was never stated or measured.
+  `pytest_collection_finish` runs once collection is complete, so no
+  ordering within `pytest_collection_modifyitems` can reach it.
+
+The one thing the count cannot see is a marker added at run time, as
+from `pytest_runtest_setup`: a collect-only run never reaches it,
+measured at `0` against a real run's `3 xpassed`. Seeing those would
+mean running the suite from the drift check, which would make an
+offline check into a second test run. The boundary is recorded rather
+than closed; the suite's own run, next to the check in CI, reports
+them.
 
 ## Measurement record
 
