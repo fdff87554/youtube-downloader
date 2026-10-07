@@ -16,6 +16,8 @@ the adapter described below.
   in.
 - `pyproject-profile.toml.example` is appended to `pyproject.toml` and
   filled in.
+- `check-conformance-drift.sh` is copied as-is and run from the
+  repository root in CI.
 
 Drop the `.example` suffix on the first one. Keep its name
 `test_ytdlp_conformance.py`, because the drift check looks for it.
@@ -111,6 +113,22 @@ Two keys need a word of warning:
   yt-dlp moves. That is the intent -- the coupling gets re-verified
   deliberately. Do not bump the string to clear the red; re-check the
   markers and then bump it.
+
+## Drift control
+
+`check-conformance-drift.sh` is the part that runs in each repository.
+It checks two things, both offline:
+
+- the canonical region still hashes to `canonical_region_sha256`;
+- the number of `pytest.mark.xfail` markers is within `xfail_budget`.
+
+Add it as a CI step next to the test run:
+
+```bash
+bash check-conformance-drift.sh tests/test_ytdlp_conformance.py pyproject.toml
+```
+
+Both arguments are optional and default to those values.
 
 ## What this test does not cover
 
