@@ -108,12 +108,34 @@ rather than raising. A chunked response, or any downloader that does
 not meter, walks straight past it. C7 therefore needs three layers, and
 a repository that claims C7 with only `max_filesize` does not conform:
 
-1. Make unmeterable downloaders unselectable. A format selector with no
-   protocol constraint can _prefer_ one. Measured against yt-dlp's own
-   `build_format_selector`, `bestaudio/best` picked `hls-ffmpeg`
-   (protocol `m3u8`), while adding `[protocol^=http]` to both branches
-   picked `https-a`. The unmeterable path was the preferred pick, not an
-   edge case.
+1. Make unmeterable downloaders unselectable, **on every fallback
+   branch**. A selector with no protocol constraint does not merely
+   allow an unmeterable format, it can prefer one: measured against
+   yt-dlp's own `build_format_selector`, `bestaudio/best` picked
+   `hls-ffmpeg` (protocol `m3u8`), while adding `[protocol^=http]` to
+   both branches picked `https-a`.
+
+   The mechanism, which is what makes this general rather than one
+   observation: `proto` sits late in yt-dlp's default sort order,
+
+   ```text
+   hasaud, lang, quality, tbr, filesize, vbr, height, width, proto, ...
+   ```
+
+   so protocol only breaks a tie once bitrate, filesize and resolution
+   are equal. Comparing two renditions that are identical in all of
+   those will show `https` winning and invite the conclusion that the
+   unmeterable path is unreachable. Give the HLS rendition a higher
+   `tbr` and it wins, under a project's own `format_sort` too. "Only
+   when nothing else is offered" is the wrong reading, and a
+   measurement on an equal-quality pair is how one arrives at it.
+
+   This also means the constraint has to be checked by **evaluating**
+   each selector, not by looking for the text of a protocol filter:
+   `bestaudio[protocol^=http]/best` contains one and still falls back
+   to an unconstrained branch, and `best[protocol=m3u8]` contains one
+   that selects exactly the wrong thing.
+
 2. Meter mid-transfer in a `progress_hooks` callback, keyed per output
    filename so the count survives a retry.
 3. Verify the landed file on disk and refuse to publish it when it is
