@@ -23,6 +23,7 @@ from app.services.youtube import (
     _finalize_process,
     _kill_process_group,
     _resolve_video_format,
+    _YtDlpLogger,
     build_download_filename,
     extract_playlist_info,
     extract_video_info,
@@ -355,6 +356,65 @@ class TestBuildDownloadFilename:
         result = build_download_filename("", "mp4")
 
         assert result == "download.mp4"
+
+
+class TestYtDlpWarningsAreAudible:
+    """Before #110 the container reported "Signature solving failed" on every
+    extraction and none of it reached the logs, because both paths silenced
+    yt-dlp. The next such regression has to be hearable (#111).
+    """
+
+    def test_the_subprocess_path_keeps_quiet_but_not_no_warnings(self) -> None:
+        # --quiet still suppresses progress and the file listing, which would
+        # otherwise drown the stderr drainer. Only warnings are let through.
+        cmd = _build_audio_command("https://www.youtube.com/watch?v=test")
+
+        assert "--quiet" in cmd
+        assert "--no-warnings" not in cmd
+
+    def test_the_api_path_keeps_quiet_but_not_no_warnings(self) -> None:
+        opts = _base_opts()
+
+        assert opts["quiet"] is True
+        assert "no_warnings" not in opts
+
+    def test_the_api_path_routes_yt_dlp_through_the_logger(self) -> None:
+        # Without this yt-dlp writes warnings to stderr itself, around the
+        # structured logger rather than through it.
+        assert isinstance(_base_opts()["logger"], _YtDlpLogger)
+
+
+class TestYtDlpLoggerAdapter:
+    def test_a_warning_reaches_the_logger_at_warning_level(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger="app.services.youtube"):
+            _YtDlpLogger(logging.getLogger("app.services.youtube")).warning(
+                "Signature solving failed: Some formats may be missing."
+            )
+
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelno == logging.WARNING
+        assert "Signature solving failed" in caplog.records[0].getMessage()
+
+    def test_debug_output_is_separated_from_info_by_its_prefix(self, caplog) -> None:
+        # yt-dlp calls debug() for both, marking the former with "[debug] ".
+        target = logging.getLogger("app.services.youtube")
+        with caplog.at_level(logging.DEBUG, logger="app.services.youtube"):
+            _YtDlpLogger(target).debug("[debug] Loading archive file")
+            _YtDlpLogger(target).debug("Downloading webpage")
+
+        assert [r.levelno for r in caplog.records] == [logging.DEBUG, logging.INFO]
+
+    def test_remote_text_cannot_forge_a_log_line(self, caplog) -> None:
+        # yt-dlp quotes the video title, which is remote-controlled; the
+        # stderr path already neutralises it and this one has to match.
+        target = logging.getLogger("app.services.youtube")
+        with caplog.at_level(logging.WARNING, logger="app.services.youtube"):
+            _YtDlpLogger(target).warning("title\u2028WARNING: forged\r\n\x1b[31m")
+
+        message = caplog.records[0].getMessage()
+        assert len(message.splitlines()) == 1, message
+        assert "\u2028" not in message
+        assert "\x1b" not in message
 
 
 class TestCacheDisabled:
