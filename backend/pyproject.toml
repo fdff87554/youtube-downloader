@@ -101,3 +101,113 @@ select = [
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "asyncio.create_subprocess_shell".msg = "starts a shell; use create_subprocess_exec with an argument list"
 "asyncio.subprocess.create_subprocess_shell".msg = "starts a shell; use create_subprocess_exec with an argument list"
+
+# The copied conformance test is excluded from the formatter, not from
+# the linter. The three projects sharing it do not share a line length
+# -- Whisper-UI uses 120, this one and voice-forge use 88 -- so each
+# one's `ruff format` would rewrite the shared region differently and
+# its hash could never match across all three. Measured on the template:
+# at 120, ruff format joins the call arguments in `_extractors_matching`
+# and collapses the implicit string concatenation in `_load_profile`.
+# `ruff check` still covers the file.
+[tool.ruff.format]
+exclude = ["tests/test_ytdlp_conformance.py"]
+
+# The yt-dlp conformance profile. Every value is a claim that
+# tests/test_ytdlp_conformance.py checks against this repository's real
+# code; see docs/ytdlp-invariants.md for what each invariant means and
+# docs/ytdlp-conformance/README.md for how the three projects share the
+# test.
+[tool.ytdlp_conformance]
+spec_version = "1.0.0"
+
+# sha256 of the copied test's canonical region. Changing the region
+# means changing this line, which is the visible part of the mechanism.
+canonical_region_sha256 = "65ce3ac81219474f9ca8aa56cc8f4596f461a212147215a35186a6e00283d7fe"
+
+# ALLOWED_EXTRACTORS in app/services/youtube.py. "youtube.*" rather than
+# ["youtube", "youtube:tab"], which matched 2 of the 20 YouTube
+# extractors and so rejected youtu.be/<id>?list=<id> and
+# youtube.com/clip/<id>. It still excludes generic, which is the one
+# that leaves YouTube.
+extractor_spec = ["youtube.*"]
+
+# C1's matrix, and C6 reuses it. The rejections are the cases that
+# matter here: a non-video path on the same host that GenericIE would
+# otherwise follow off-site, authority confusion, and the link-local
+# metadata address.
+accepts_urls = [
+  "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "https://youtu.be/dQw4w9WgXcQ",
+  "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+]
+rejects_urls = [
+  "https://www.youtube.com/about/",
+  "https://youtube.com@evil.com/watch?v=dQw4w9WgXcQ",
+  "http://169.254.169.254/latest/meta-data/",
+]
+
+# _base_opts() passes cachedir=False and every CLI command passes
+# --no-cache-dir, so yt-dlp writes nothing to ~/.cache/yt-dlp.
+cachedir = false
+
+# VIDEO_FORMAT_SORT. H.264 and AAC are preferred over AV1 and VP9
+# because far more hardware decoders handle them (#112).
+codec_policy = "h264-preferred"
+
+# SOCKET_TIMEOUT, passed on both paths: socket_timeout in _base_opts()
+# and --socket-timeout in _YTDLP_BASE_ARGS.
+socket_timeout_seconds = 30
+
+# No byte ceiling is enforced anywhere in this service, and 0 says so
+# rather than declaring an intent the code does not hold. Media is
+# piped from yt-dlp straight to the HTTP response, so there is no
+# landed file to measure and no in-process downloader to meter. What a
+# ceiling should mean for a passthrough stream is the open question in
+# #138; the C7 waivers below record the gap until it is answered.
+max_bytes = 0
+
+js_runtime = "deno"
+# The Docker image installs Deno; local development supplies its own.
+js_runtime_provided_by = "image"
+
+# yt-dlp-ejs==0.8.0 is pinned in this file's own dependencies, so the
+# solver scripts cannot drift from the yt-dlp they are paired with.
+ejs_coupling = "pinned"
+
+# This repository classifies yt-dlp failures by matching its stderr, so
+# the coupling is real and has to name the version it was read against.
+# Verified against yt-dlp 2026.8.19: 13 of the 15 marker strings appear
+# in its source. The two that do not -- "inappropriate for some users"
+# and "not a bot" -- are YouTube's own playabilityStatus wording passed
+# through by yt-dlp rather than produced by it, which the code says at
+# the point it declares them.
+markers_verified_against = "2026.8.19"
+
+# No PO Token provider is configured, and no code reads one.
+po_token_hook = "absent"
+
+# No player_client override. When PO Token pressure appears, the first
+# response is a client that does not need one, not obtaining a token.
+player_clients = ["default"]
+
+# ffmpeg converts to MP3 and remuxes to fragmented MP4. ffprobe is not
+# used: the stream summary is parsed from ffmpeg's own stderr.
+needs_ffmpeg = true
+needs_ffprobe = false
+
+# Two items, both C7.selectable, both listed by node id in
+# tests/conftest.py with the issue that closes them. Enforced by
+# docs/ytdlp-conformance/check-conformance-drift.sh, not by anything in
+# the test module; declaring it without running that script leaves it
+# unenforced.
+xfail_budget = 2
+
+# Aspects this repository cannot meet, recorded rather than omitted.
+# Each reason cites an issue, so the gap stays visible and countable.
+[tool.ytdlp_conformance.waivers]
+C5 = "error-message content is not visible through the shared adapter; see #140"
+"C7.metered" = "no in-process downloading site exists and no byte ceiling is enforced; see #138"
+"C7.external" = "every download shells out to the yt-dlp CLI, which reports nothing a shared test can meter; see #138"
+"C7.landed" = "media is streamed to the client and never lands on disk; see #138"
+"C8.deadline" = "a streamed response has no wall-clock bound; see #141"
