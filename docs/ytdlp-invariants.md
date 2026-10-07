@@ -136,22 +136,47 @@ applies it. It is a per-operation socket timeout, though, not a bound
 on the whole download, and a spec that conflates the two invites
 exactly the wrong fix.
 
-The real gap found next to it: `retries` and `fragment_retries` default
-to 10 **only in the CLI option parser** (`yt_dlp/options.py:1025`). A
-directly constructed `YoutubeDL(params)` gets `None`, and
-`yt_dlp/utils/_utils.py:5267` turns that into `0`. Measured:
+### Three kinds of retry, and the one that defaults to nothing
+
+yt-dlp has three retry budgets, and they are not interchangeable. The
+distinction matters because `retries` looks like the general one and is
+not.
+
+- **Extraction** uses `extractor_retries`, which
+  `extractor/common.py:4072` defaults to 3:
+  `RetryManager(self.get_param('extractor_retries', 3), ...)`. The
+  YouTube extractor uses it in `youtube/_base.py:981`
+  (`_download_webpage_with_retries`) and `:1287-1289`
+  (`_extract_response`, the API JSON path behind player responses and
+  playlist browsing). A caller that sets nothing therefore still gets
+  four attempts at metadata.
+- **Media download** uses `retries`, read by
+  `downloader/http.py:360` as `RetryManager(self.params.get('retries'), ...)`.
+- **Fragment download** uses `fragment_retries`, the same story per
+  fragment.
+
+The last two default to 10 **only in the CLI option parser**
+(`options.py:1025`). A directly constructed `YoutubeDL(params)` gets
+`None`, and `utils/_utils.py:5267` turns that into `0`. Measured:
 
 ```text
-CLI defaults                      -> retries: 10   fragment_retries: 10
-Python API params.get('retries')  -> None
-RetryManager(None).retries        -> 0
-RetryManager(10).retries          -> 10
+params.get('retries')                        -> None
+RetryManager(retries=None)                   -> 1 attempt
+get_param('extractor_retries', 3)            -> 3
+RetryManager(extractor_retries=3)            -> 4 attempts
 ```
 
-So a Python API caller that never sets `retries` has no HTTP retry at
-all: one transient failure fails the whole job. `extractor_retries` is
-unaffected; `extractor/common.py:4072` gives it an explicit default
-of 3.
+So an in-process caller that never sets `retries` has no retry **on the
+media transfer**: one transient failure fails that download. Its
+metadata extraction is unaffected, and a repository that drives yt-dlp
+in-process purely to read metadata needs neither key.
+
+C8 therefore constrains `retries` and `fragment_retries` at download
+call sites only. Setting them on an extract-only call site would be
+harmless but meaningless, and requiring it would be a spec asserting a
+defect that is not there. What does apply everywhere: if a repository
+sets `extractor_retries` at all, it must be positive -- setting it to 0
+silently removes the retry that was there by default.
 
 ### Why C10 pins to a version
 
@@ -278,7 +303,7 @@ because none of it is a general truth about YouTube.
   28.5 MiB. The 232.5 MiB was being fetched to produce a 16 kHz mono
   wav.
 - **Retry defaults**, quoted under
-  [Why C8 does not mean socket_timeout](#why-c8-does-not-mean-socket_timeout).
+  [Three kinds of retry](#three-kinds-of-retry-and-the-one-that-defaults-to-nothing).
 - **Protocol preference**, quoted under
   [Why C7 needs more than max_filesize](#why-c7-needs-more-than-max_filesize).
 
