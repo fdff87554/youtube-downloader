@@ -351,14 +351,26 @@ def _drive_hooks(hooks: Iterable[Any], status: dict[str, Any]) -> BaseException 
     """Run the hooks the way yt-dlp does, and report what stopped them.
 
     ``downloader/common.py:488-495`` iterates every hook in order with
-    the same status object, so the first one to raise ends the
-    transfer and the rest never run. The question this answers is
-    whether the *set* stops it, not whether any particular member
-    does.
+    **one** status object, so the first one to raise ends the transfer
+    and the rest never run. The question this answers is whether the
+    *set* stops it, not whether any particular member does.
+
+    The copy is taken once, before the loop, and never inside it.
+    Sharing the object is deliberate upstream -- the source says so in
+    as many words, at ``:489-493``: "Ideally we want to make a copy of
+    the dict, but that is too slow", then "youtube-dl passes the same
+    status object to all the hooks ... So keep this behavior if
+    possible". A hook that rewrites the event therefore changes what
+    every later hook sees, and copying per hook hid exactly that: a
+    pair whose first member zeroes the counters was reported as
+    stopping a transfer it cannot stop. Copying once still keeps
+    ``status`` itself untouched, so the caller can reuse one event
+    across several hook sets.
     """
+    event = dict(status)
     for hook in hooks:
         try:
-            hook(dict(status))
+            hook(event)
         except BaseException as error:  # noqa: BLE001
             return error
     return None
@@ -497,6 +509,7 @@ ASPECT_OF_TEST = {
     "test_the_pool_can_exercise_a_height_limited_selector": "C7.selectable",
     "test_every_in_process_downloading_site_meters_mid_transfer": "C7.metered",
     "test_a_metering_hook_lets_a_transfer_within_the_ceiling_through": "C7.metered",
+    "test_a_hook_that_rewrites_the_event_defeats_the_one_after_it": "C7.metered",
     "test_a_subprocess_download_declares_its_unverifiable_bound": "C7.external",
     "test_the_declared_timeout_is_positive": "C8.socket",
     "test_every_call_site_sets_the_declared_timeout": "C8.socket",
@@ -1028,6 +1041,42 @@ class TestTheByteCeilingIsDeclaredAndReachable:
             raised = _drive_hooks(hooks, within)
             assert raised is None, (
                 f"{site.name} stopped a transfer inside its ceiling: {raised!r}"
+            )
+
+    def test_a_hook_that_rewrites_the_event_defeats_the_one_after_it(
+        self,
+    ) -> None:
+        # A guard on the checker, not on the repository. yt-dlp hands
+        # one status object to every hook and says at
+        # downloader/common.py:489-493 that the sharing is deliberate,
+        # so a hook that rewrites the event changes what the next one
+        # sees. Driving the hooks with a copy each hid that: the pair
+        # below was reported as stopping a transfer it cannot stop. If
+        # this stops holding, every hook set above is being judged
+        # against a yt-dlp that does not exist.
+        ceiling = 1024
+
+        def clear(status: dict[str, Any]) -> None:
+            status["downloaded_bytes"] = 0
+            status["total_bytes"] = 0
+
+        def guard(status: dict[str, Any]) -> None:
+            if (status.get("downloaded_bytes") or 0) > ceiling:
+                raise ValueError("over the ceiling")
+
+        for label, event in _oversized_events(ceiling):
+            assert _drive_hooks([guard], event) is not None, (
+                f"the guard alone did not stop {label}, so the pair below "
+                "proves nothing"
+            )
+            assert _drive_hooks([clear, guard], event) is None, (
+                f"a hook that zeroes the event did not defeat the guard "
+                f"after it on {label}; the hooks are being driven with a "
+                "copy each, and yt-dlp does not"
+            )
+            assert event["downloaded_bytes"] > ceiling, (
+                f"driving the hooks mutated the caller's {label} event, so "
+                "one hook set can no longer be compared against another"
             )
 
     def test_a_subprocess_download_declares_its_unverifiable_bound(

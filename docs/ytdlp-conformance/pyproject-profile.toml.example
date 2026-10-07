@@ -88,9 +88,14 @@ needs_ffprobe = false
 
 # The maximum number of collected test items in the conformance module
 # that may carry an xfail marker. The list is the backlog and may only
-# shrink; a test in the module enforces this, counting from pytest's
-# collection rather than from the file's text. Lowering it is a visible
-# one-line diff, and so is raising it.
+# shrink. Lowering it is a visible one-line diff, and so is raising it.
+#
+# Nothing in the test module enforces this, and nothing can: a
+# module-level pytestmark marks a budget test living there too, so its
+# failure is reported as an xfail and the run stays green. The check
+# runs from outside, in check-conformance-drift.sh, which counts the
+# collected items through a pytest plugin. Declaring the budget
+# without running that script leaves it unenforced.
 xfail_budget = 0
 
 # A repository that cannot meet an aspect records it here rather than

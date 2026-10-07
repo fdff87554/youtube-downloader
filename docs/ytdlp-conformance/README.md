@@ -274,6 +274,13 @@ is written down in the spec so that it stays countable.
   stops the transfer. Requiring each hook to raise individually rejects
   a legitimate `[observer, guard]` pair.
 
+  One object, not one per hook: upstream says the sharing is
+  deliberate, so a hook that rewrites the event changes what every
+  later hook sees. Driving the hooks with a copy each reported a pair
+  whose first member zeroes the counters as stopping a transfer it
+  cannot stop. A guard test pins it from both ends -- the guard alone
+  must stop each event, and the pair must fail to.
+
   Four shapes of oversized event are used: length reported, length
   `None`, length absent, and a `finished` event. The first alone is not
   enough -- `total_bytes` is Content-Length, so a hook reading only
