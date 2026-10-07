@@ -1,0 +1,119 @@
+# Append to the repository's pyproject.toml.
+#
+# Every key is mandatory and none has a default: a key added upstream
+# turns all three repositories red at once, instead of passing silently
+# in the two that did not notice.
+#
+# The values below are ILLUSTRATIVE. Do not copy them as though they
+# were measured for your repository: each one is a claim the test will
+# check against reality, so fill it in from the code and leave a waiver
+# where the code does not yet hold. Most values are expected to differ
+# between the three repositories, and differing is not drift.
+[tool.ytdlp_conformance]
+# Must equal SPEC_VERSION in the copied test.
+spec_version = "1.0.0"
+
+# sha256 of the copied test's canonical region, as
+# check-conformance-drift.sh computes it. Changing the region means
+# changing this line too, which is the visible part of the mechanism.
+canonical_region_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# The allowed_extractors value in use. "youtube.*" here because this
+# project accepts the URL as the user typed it, including ?list= and
+# /clip/; a project that canonically rebuilds first only needs
+# ["youtube"], and that is not a weaker pin.
+extractor_spec = ["youtube.*"]
+
+# C1's matrix, and C6 reuses it. Keep the rejections pointed at the
+# cases that matter: authority confusion, a non-video path on the same
+# host, and the link-local metadata address.
+accepts_urls = [
+  "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "https://youtu.be/dQw4w9WgXcQ",
+  "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+]
+rejects_urls = [
+  "https://www.youtube.com/about/",
+  "https://youtube.com@evil.com/watch?v=dQw4w9WgXcQ",
+  "http://169.254.169.254/latest/meta-data/",
+]
+
+# false here because the container is read-only and writes nothing at
+# runtime. Not a shared default: for the batch consumers, disabling it
+# only adds nsig recomputation.
+cachedir = false
+
+# h264-preferred | h264-forced | audio-only | none. Preferring via
+# -S is not the same as forcing via a filter: a filter makes an
+# AV1-only video fall back to a worse progressive format.
+codec_policy = "h264-preferred"
+
+# Always explicit. Leaving it unset is not "no timeout" -- yt-dlp
+# applies DEFAULT_TIMEOUT = 20 -- but it is undeclared, and an
+# undeclared value is one nobody notices changing.
+socket_timeout_seconds = 30
+
+# C7's ceiling, in bytes. There is no "no ceiling" value: a repository
+# that has not decided on one waives the C7 aspects it cannot meet and
+# says why, rather than writing a number it does not enforce.
+max_bytes = 4294967296
+
+# The runtime name, or "absent".
+js_runtime = "deno"
+# image | host | none. "image" says out loud that this is a deployment
+# dependency the repository does not install itself.
+js_runtime_provided_by = "image"
+
+# pinned | absent. "absent" is asserted in reverse: the test requires
+# the package NOT to be installed, so the declaration cannot quietly
+# become false through a transitive dependency.
+ejs_coupling = "pinned"
+
+# The yt-dlp version any error-text matching was verified against, or
+# "none". The test fails when the installed version moves, so the
+# markers get re-verified deliberately instead of rotting.
+markers_verified_against = "none"
+
+# absent | env. With "absent", the test fails if YTDLP_PO_TOKEN is set
+# in the environment, which catches a half-applied configuration.
+po_token_hook = "absent"
+
+# A declared value. When PO Token pressure appears, the first response
+# is a client that does not need one (tv, web_embedded, android_vr),
+# not going to obtain a token.
+player_clients = ["default"]
+
+needs_ffmpeg = true
+needs_ffprobe = false
+
+# The maximum number of collected test items in the conformance module
+# that may carry an xfail marker. The list is the backlog and may only
+# shrink. Lowering it is a visible one-line diff, and so is raising it.
+#
+# Nothing in the test module enforces this, and nothing can: a
+# module-level pytestmark marks a budget test living there too, so its
+# failure is reported as an xfail and the run stays green. The check
+# runs from outside, in check-conformance-drift.sh, which counts the
+# collected items through a pytest plugin. Declaring the budget
+# without running that script leaves it unenforced.
+xfail_budget = 0
+
+# A repository that cannot meet an aspect records it here rather than
+# omitting the test. Keyed by aspect, and the reason must cite an
+# issue, so the gap stays visible, countable and greppable.
+#
+# Three have to be here in every repository, because the shared test
+# cannot check them: C5 (error-message content is not visible through
+# the adapter), C7.landed (a streaming repository lands no file) and
+# C8.deadline (nothing here has a wall-clock bound). A fourth,
+# C7.external, is required of any repository that downloads through a
+# subprocess, because a subprocess reports nothing back for a shared
+# test to measure.
+#
+# A waiver is not an apology -- an aspect with no waiver and no test is
+# a failure, and these are how that rule stays satisfiable.
+[tool.ytdlp_conformance.waivers]
+C5 = "error text is not reachable through the adapter; see #NNN"
+"C7.landed" = "media is streamed to the client and never lands; see #NNN"
+"C7.external" = "every download shells out to the yt-dlp CLI; see #NNN"
+"C8.deadline" = "no wall-clock bound on a streamed response; see #NNN"

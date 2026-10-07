@@ -1,0 +1,129 @@
+"""The ``ytdlp_subject`` fixture the conformance test reaches through.
+
+Append this to the repository's ``conftest.py`` and fill in the three
+members with that repository's own functions. The conformance test
+imports nothing from the repository under test: this adapter is the
+single seam, which is what lets the test itself stay byte-identical in
+all three repositories while the code around it differs completely.
+
+Nothing here is shared, so nothing here is hashed. Edit it freely.
+
+The bodies below are wired to Youtube-Downloader as a worked example,
+through its real entry points rather than the builder they share. An
+earlier version called the shared builder directly and so omitted the
+mp3 path and the CLI extraction entirely, which is exactly the blind
+spot a per-call-site check exists to remove.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+# Replace with this repository's own names. Import the entry points
+# the production code calls, not the generic builder underneath them:
+# a builder invoked directly from here cannot notice one entry point
+# being changed on its own.
+from app.services.youtube import (  # type: ignore[import-not-found]
+    InvalidURLError,
+    _base_opts,
+    _build_audio_command,
+    _build_info_command,
+    _build_video_commands,
+    _neutralize_control_chars,
+    normalize_youtube_url,
+)
+from test_ytdlp_conformance import DOWNLOAD, EXTRACT, CallSite
+
+_SAMPLE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+# Every quality the API accepts. _resolve_video_format builds a
+# different selector per tier, so checking one of them checks one of
+# them.
+_QUALITIES = ("best", "1080", "720", "480")
+
+
+class YtDlpSubject:
+    """What the conformance test needs to know about this repository."""
+
+    def call_sites(self) -> list[CallSite]:
+        """Every place this repository hands work to yt-dlp.
+
+        List them all, not a representative one, and reach them
+        through the functions the production code calls. The checks
+        that run per site are the ones a single forgotten call site
+        silently defeats: an extractor pin applied in three places out
+        of four is the shape of the failure this is here to catch.
+
+        Note what this repository declares and what it does not. It
+        drives yt-dlp in-process only to read metadata, and every byte
+        it downloads goes through a subprocess, so no site here is both
+        in-process and a download. Saying so is the point of
+        ``purpose``.
+        """
+        sites = [
+            CallSite(
+                name="extract_video_info",
+                purpose=EXTRACT,
+                options=_base_opts() | {"noplaylist": True},
+            ),
+            CallSite(
+                name="extract_playlist_info",
+                purpose=EXTRACT,
+                options=_base_opts()
+                | {"extract_flat": "in_playlist", "noplaylist": False},
+            ),
+            CallSite(
+                name="_build_info_command",
+                purpose=EXTRACT,
+                arguments=_build_info_command(_SAMPLE_URL),
+            ),
+            CallSite(
+                name="_build_audio_command (mp3)",
+                purpose=DOWNLOAD,
+                arguments=_build_audio_command(_SAMPLE_URL),
+            ),
+        ]
+        for quality in _QUALITIES:
+            video, audio = _build_video_commands(quality)
+            sites.append(
+                CallSite(
+                    name=f"_build_video_commands({quality}) video",
+                    purpose=DOWNLOAD,
+                    arguments=video,
+                )
+            )
+            sites.append(
+                CallSite(
+                    name=f"_build_video_commands({quality}) audio track",
+                    purpose=DOWNLOAD,
+                    arguments=audio,
+                )
+            )
+        return sites
+
+    def canonicalize(self, url: str) -> str | None:
+        """The rebuilt URL, or ``None`` when this repository refuses it.
+
+        ``None`` must mean refused: a function that raises is wrapped
+        here, because the test reads ``None`` as the declared rejection
+        and an exception as a bug.
+
+        Returning a URL is not a claim that the URL is safe. This
+        repository takes the URL as the user typed it, so the rebuild
+        only lowercases scheme and host and lets "/about/" through; the
+        extractor pin is what refuses that one. The test checks the
+        pair, not either layer alone.
+        """
+        try:
+            return normalize_youtube_url(url)
+        except InvalidURLError:
+            return None
+
+    def neutralize(self, text: str) -> str:
+        """Remote-controlled text, made safe to display or log."""
+        return _neutralize_control_chars(text)
+
+
+@pytest.fixture(scope="session")
+def ytdlp_subject() -> YtDlpSubject:
+    return YtDlpSubject()
