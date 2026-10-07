@@ -81,17 +81,32 @@ copies and their recorded hashes follow.
 
 ## Waivers, and what counts as covered
 
-Each test class carries an `INVARIANT` tag, and one autouse fixture
-turns a waiver in the profile into a skip for that class, with the
-waiver's own text as the skip reason. A waiver is therefore visible in
-the test report, not only in the manifest.
+The accounting unit is an **aspect**, not a whole invariant. C7 asks
+for a ceiling that holds on every downloader path and C8 for a bound on
+the whole download; neither is one check, and a test covering one part
+must not clear the invariant. The spec's
+[Aspects](../ytdlp-invariants.md#aspects) section is the list.
 
-`COVERED_INVARIANTS` in the test lists what the file checks
-mechanically, and `TestEveryInvariantIsAccountedFor` fails when an
-invariant has neither a test nor a waiver. That is what stops "no
-test" from reading the same as "passing". **C5 is in that position
-today** -- error-message content is not visible through the adapter --
-so every repository has to waive C5 deliberately, with an issue link.
+In the test, `SPEC_ASPECTS` holds all of them, `COVERED_ASPECTS` the
+ones this file checks, and `ASPECT_OF_TEST` maps each test to the
+aspect it stands for. One autouse fixture reads that map and turns a
+waiver into a skip carrying the waiver's own text, so a waiver shows up
+in the test report and not only in the manifest.
+
+Three tests guard the accounting itself:
+
+- an aspect with neither a test nor a waiver fails;
+- an aspect listed in `COVERED_ASPECTS` with no test behind it fails,
+  so adding an entry there cannot excuse a waiver;
+- a test naming an aspect the spec does not define fails.
+
+**Three aspects have to be waived by every repository**, because the
+shared test cannot check them: `C5` (error-message content is not
+visible through the adapter), `C7.landed` (a repository that streams
+its media lands no file, and one that does exposes no hook for a shared
+test), and `C8.deadline` (none of the three has a wall-clock bound, and
+a shared test cannot invent the mechanism it would check). Each needs
+an issue link.
 
 ## Filling in the profile
 
@@ -110,9 +125,15 @@ each other.
 Two keys need a word of warning:
 
 - `accepts_urls` / `rejects_urls` are checked against the **real**
-  extractor registry. A URL in `rejects_urls` must reach no extractor,
-  either because the rebuild refuses it or because the pin matches
-  nothing for it. Both layers count; neither has to do it alone.
+  extractor registry, `generic` included. A URL in `rejects_urls` must
+  reach no extractor, either because the rebuild refuses it or because
+  the pin matches nothing for it. Both layers count; neither has to do
+  it alone. The pin itself must not leave `generic` enabled, which is
+  checked separately -- with it enabled, the malicious-authority URL
+  and the link-local metadata address both match it.
+- `max_bytes` has no "unlimited" value. A repository that has not
+  decided on a ceiling waives `C7.metered` and says why, rather than
+  recording a number nothing enforces.
 - `markers_verified_against` fails the test as soon as the installed
   yt-dlp moves. That is the intent -- the coupling gets re-verified
   deliberately. Do not bump the string to clear the red; re-check the
@@ -154,11 +175,24 @@ is written down in the spec so that it stays countable.
 - It never reaches the network, so it says nothing about whether
   extraction currently works against YouTube. That is the job of the
   runtime self-check, the third layer in the spec.
-- C5 (no internal detail in error messages) and the parts of C7 that
-  depend on observing a real transfer are not checkable from the
-  adapter surface. A repository that has not yet wired them records an
-  `xfail` with an issue link, and `xfail_budget` keeps that list from
-  growing.
+- The three aspects listed above are not checkable from the adapter
+  surface and are waived rather than tested. A repository with a gap it
+  intends to close instead records an `xfail` with an issue link, and
+  `xfail_budget` keeps that list from growing.
+- `C7.selectable` is checked by **evaluating** each download selector
+  against two offline format pools, not by searching it for a protocol
+  filter. One pool offers meterable and unmeterable renditions, with
+  the unmeterable ones carrying the higher bitrate -- protocol is only
+  a tiebreak in yt-dlp's sort order, so an equal-quality pool makes an
+  unconstrained selector look safe. The other offers nothing meterable,
+  which is the only way to exercise a fallback branch:
+  `bestaudio[protocol^=http]/best` passes the first pool, because its
+  first branch matches and its unconstrained second branch is never
+  reached.
+- `C7.metered` drives each `progress_hooks` callback with a status past
+  the ceiling and requires it to raise, then with one inside the
+  ceiling and requires it not to. Asserting that the hook list is
+  non-empty passes for a hook that does nothing.
 - It reaches two of yt-dlp's private attributes, `_ies` and
   `_js_runtimes`. Both are guarded with `hasattr` and **fail** rather
   than skip when they are missing, because a silent skip is the failure
