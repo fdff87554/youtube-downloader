@@ -8,6 +8,12 @@
 # a sibling stuck on an older spec version is visible rather than merely
 # discoverable.
 #
+# Report-only is not the same as silent, though. A row says which of
+# three things happened -- the profile was read, the repository has not
+# declared one, or the query failed -- and a failed query carries the
+# error with it. Collapsing those into one row is how a broken token
+# comes to look like a sibling that has not adopted the spec.
+#
 # Not covered: voice-forge, which is private. Reading it from a public
 # repository's CI would mean holding a credential with read access to a
 # private repository. It runs layers 1 and 2 in its own CI instead --
@@ -80,19 +86,54 @@ report="$workdir/report.md"
 	printf '| --- | --- | --- |\n'
 } >"$report"
 
+# Fetches one manifest to $1. Returns 0 on success, 3 when the API
+# says the path is absent, and 1 for anything else -- which is the
+# distinction the first version of this script lost: every failure,
+# including an auth failure, was reported as "no manifest found", so a
+# repository that had simply not adopted the spec looked identical to
+# one the script could not read.
+fetch_manifest() {
+	local repo="$1" path="$2" target="$3" encoded="" status=0
+
+	encoded="$(gh api "repos/$repo/contents/$path" --jq '.content' 2>"$workdir/err")" ||
+		status=$?
+
+	if [ "$status" -ne 0 ]; then
+		if grep -qiE 'HTTP 404|Not Found' "$workdir/err"; then
+			return 3
+		fi
+		return 1
+	fi
+
+	printf '%s' "$encoded" | base64 -d >"$target" 2>/dev/null || return 1
+	[ -s "$target" ] || return 1
+	return 0
+}
+
 for repo in "${SIBLINGS[@]}"; do
 	manifest=""
+	diagnosis=""
 	for path in "${MANIFEST_PATHS[@]}"; do
 		candidate="$workdir/manifest.toml"
-		if gh api "repos/$repo/contents/$path" --jq '.content' 2>/dev/null |
-			base64 -d >"$candidate" 2>/dev/null && [ -s "$candidate" ]; then
+		status=0
+		fetch_manifest "$repo" "$path" "$candidate" || status=$?
+		if [ "$status" -eq 0 ]; then
 			manifest="$candidate"
 			break
+		fi
+		if [ "$status" -ne 3 ]; then
+			# A real failure, not an absent path. Keep the first one:
+			# the later paths will fail the same way.
+			diagnosis="${diagnosis:-$(tr -d '\n' <"$workdir/err" | cut -c1-120)}"
 		fi
 	done
 
 	if [ -z "$manifest" ]; then
-		printf '| %s | no manifest found | - |\n' "$repo" >>"$report"
+		if [ -n "$diagnosis" ]; then
+			printf '| %s | unavailable | %s |\n' "$repo" "$diagnosis" >>"$report"
+		else
+			printf '| %s | no manifest found | - |\n' "$repo" >>"$report"
+		fi
 		continue
 	fi
 

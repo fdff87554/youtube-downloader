@@ -190,6 +190,20 @@ that has not adopted the spec reports as `not declared` rather than
 failing the step -- a check that goes red for a reason nobody can act on
 is a check people learn to ignore.
 
+Report-only is not the same as silent. Each row says which of three
+things happened, and a failed query carries the error with it:
+
+| Row                  | Meaning                                             |
+| -------------------- | --------------------------------------------------- |
+| a version and a hash | the profile was read                                |
+| `not declared`       | the repository has no `[tool.ytdlp_conformance]`    |
+| `no manifest found`  | the API returned 404 for every candidate path       |
+| `unavailable`        | the query failed, with the error in the next column |
+
+Collapsing those is how a broken token comes to look like a sibling
+that has not adopted the spec -- which is what the first version did,
+reporting `no manifest found` for an HTTP 401.
+
 It covers this repository and Whisper-UI, and not voice-forge, which is
 private: reading it from a public repository's CI would mean holding a
 credential with read access to a private repository. voice-forge runs
