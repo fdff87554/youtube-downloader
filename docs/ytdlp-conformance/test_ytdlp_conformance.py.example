@@ -1,0 +1,631 @@
+"""Conformance test for the shared yt-dlp invariants.
+
+Copy this file into the repository's test path, drop the ``.example``
+suffix, and supply the ``ytdlp_subject`` fixture from
+``conftest-fixture.py.example``. The spec is
+``docs/ytdlp-invariants.md`` in fdff87554/youtube-downloader.
+
+Everything between the two canonical sentinels below is shared across
+all three repositories and must stay byte-identical: a drift check
+hashes exactly that span. Repository-specific tests belong *below* the
+end sentinel, where they are expected and do not move the hash.
+
+The expected values are data, held in ``[tool.ytdlp_conformance]`` in
+the repository's ``pyproject.toml``. The logic here is a constant, and
+this file imports nothing from the repository it is testing -- the
+adapter fixture is the only seam.
+
+This test never touches the network. Where it reaches into yt-dlp's
+private attributes it guards with ``hasattr`` and **fails** rather than
+skipping, because a silent skip is the failure mode the whole mechanism
+exists to prevent.
+"""
+
+# --- ytdlp-conformance:canonical-begin ---
+from __future__ import annotations
+
+import importlib.metadata as metadata
+import itertools
+import os
+import re
+import shutil
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yt_dlp
+
+SPEC_VERSION = "1.0.0"
+
+REQUIRED_PROFILE_KEYS = frozenset(
+    {
+        "spec_version",
+        "canonical_region_sha256",
+        "extractor_spec",
+        "accepts_urls",
+        "rejects_urls",
+        "cachedir",
+        "codec_policy",
+        "socket_timeout_seconds",
+        "max_bytes",
+        "js_runtime",
+        "js_runtime_provided_by",
+        "ejs_coupling",
+        "markers_verified_against",
+        "po_token_hook",
+        "player_clients",
+        "needs_ffmpeg",
+        "needs_ffprobe",
+        "xfail_budget",
+    }
+)
+OPTIONAL_PROFILE_KEYS = frozenset({"waivers"})
+INVARIANT_IDS = frozenset(f"C{n}" for n in range(1, 11))
+# The invariants this file checks mechanically, each the INVARIANT tag
+# of one test class below. Anything in INVARIANT_IDS and not here has
+# to be waived explicitly, which is what stops "no test" from reading
+# the same as "passing".
+COVERED_INVARIANTS = frozenset({"C1", "C2", "C3", "C4", "C6", "C7", "C8", "C9", "C10"})
+
+# yt-dlp declares the yt-dlp-ejs version it expects in an extra. Which
+# extra has changed between releases, so both spellings are accepted;
+# what matters is the pinned version, not where it is parked.
+PINNED_EJS_REQUIREMENT = re.compile(
+    r"^yt-dlp-ejs\s*==\s*(?P<version>[\w.]+)\s*;.*extra\s*==\s*"
+    r"['\"](?:pin|default)['\"]"
+)
+
+# C4's vectors. The last two are U+2028 and U+2029, written with chr()
+# so that neither this file nor a reviewer's diff carries a character
+# that renders as a line break. They are here deliberately: they are
+# the two that ``str.splitlines()`` breaks on while Unicode's ``C``
+# category does not cover them, so a neutraliser written against
+# ``unicodedata.category(ch).startswith("C")`` lets them through and
+# still produces a forged line.
+CONTROL_CHARACTER_VECTORS = (
+    "\r",
+    "\n",
+    "\x1b",
+    "\x00",
+    chr(0x2028),
+    chr(0x2029),
+)
+
+# C7 layer 1: a format selector has to constrain the protocol, or an
+# unmeterable downloader can be the *preferred* pick rather than an
+# edge case.
+_PROTOCOL_CONSTRAINT = re.compile(r"\[protocol\s*[\^$*~!]?=")
+
+EXTRACT = "extract"
+DOWNLOAD = "download"
+
+
+@dataclass(frozen=True)
+class CallSite:
+    """One place where the repository hands work to yt-dlp.
+
+    A repository usually has several, and they do not all have the same
+    obligations: a site that only extracts metadata cannot be required
+    to meter a transfer, and a site that downloads cannot be excused
+    from it. Declaring them separately is what keeps the checks honest
+    rather than approximately right.
+
+    ``name`` appears in the assertion message, so make it the name of
+    the function it comes from. Exactly one of ``options`` and
+    ``arguments`` is set: ``options`` for yt-dlp driven in-process,
+    ``arguments`` for the full argv of a subprocess.
+    """
+
+    name: str
+    purpose: str
+    options: dict[str, Any] | None = None
+    arguments: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.purpose not in {EXTRACT, DOWNLOAD}:
+            raise ValueError(
+                f"{self.name}: purpose must be {EXTRACT!r} or {DOWNLOAD!r}"
+            )
+        if (self.options is None) == (self.arguments is None):
+            raise ValueError(f"{self.name}: set exactly one of options and arguments")
+
+    @property
+    def drives_in_process(self) -> bool:
+        return self.options is not None
+
+
+def _repository_root() -> Path:
+    """The nearest ancestor directory holding a ``pyproject.toml``."""
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / "pyproject.toml").is_file():
+            return candidate
+    pytest.fail(
+        "no pyproject.toml above this test, so the conformance profile "
+        "cannot be located; the test was copied to the wrong place"
+    )
+
+
+def _load_profile() -> dict[str, Any]:
+    manifest = _repository_root() / "pyproject.toml"
+    with manifest.open("rb") as handle:
+        data = tomllib.load(handle)
+    profile = data.get("tool", {}).get("ytdlp_conformance")
+    if profile is None:
+        pytest.fail(
+            f"{manifest} declares no [tool.ytdlp_conformance]; every key "
+            "is mandatory and none has a default, by design"
+        )
+    return profile
+
+
+@pytest.fixture(scope="session")
+def profile() -> dict[str, Any]:
+    return _load_profile()
+
+
+@pytest.fixture(scope="session")
+def waivers(profile: dict[str, Any]) -> dict[str, str]:
+    return profile.get("waivers", {})
+
+
+@pytest.fixture(autouse=True)
+def _honour_waivers(request: pytest.FixtureRequest, waivers: dict[str, str]) -> None:
+    """Skip a waived invariant's tests, loudly and by name.
+
+    A waiver is the visible, countable alternative to deleting a test:
+    it still has to cite an issue, it still shows up in the profile,
+    and the reason travels into the test report rather than leaving a
+    silent gap.
+    """
+    invariant = getattr(request.cls, "INVARIANT", None)
+    if invariant is None:
+        return
+    reason = waivers.get(invariant)
+    if reason is not None:
+        pytest.skip(f"{invariant} waived: {reason}")
+
+
+@pytest.fixture(scope="session")
+def call_sites(ytdlp_subject: Any) -> list[CallSite]:
+    sites = list(ytdlp_subject.call_sites())
+    if not sites:
+        pytest.fail(
+            "the adapter declared no call sites, so nothing about how "
+            "this repository drives yt-dlp can be checked"
+        )
+    return sites
+
+
+def _sites_for(sites: list[CallSite], purpose: str) -> list[CallSite]:
+    return [site for site in sites if site.purpose == purpose]
+
+
+def _in_process(sites: list[CallSite]) -> list[CallSite]:
+    return [site for site in sites if site.drives_in_process]
+
+
+def _as_subprocess(sites: list[CallSite]) -> list[CallSite]:
+    return [site for site in sites if not site.drives_in_process]
+
+
+def _extractors_matching(spec: list[str], url: str) -> list[str]:
+    """Extractor names that would accept ``url`` under ``spec``.
+
+    Built from the real registry. ``extract_info`` is not usable here:
+    once an extractor matches it issues actual HTTP requests, and this
+    test has to stay offline.
+    """
+    ydl = yt_dlp.YoutubeDL(
+        {"allowed_extractors": spec, "quiet": True, "no_warnings": True}
+    )
+    if not hasattr(ydl, "_ies"):
+        pytest.fail(
+            "yt_dlp.YoutubeDL no longer exposes _ies, so the extractor "
+            "matrix cannot be checked; this test needs rewriting against "
+            "whatever replaced it"
+        )
+    return [
+        ie.IE_NAME
+        for ie in ydl._ies.values()
+        if ie.IE_NAME != "generic" and ie.suitable(url)
+    ]
+
+
+def _expected_ejs_version() -> str:
+    requirements = metadata.metadata("yt-dlp").get_all("Requires-Dist") or []
+    for requirement in requirements:
+        match = PINNED_EJS_REQUIREMENT.match(requirement)
+        if match:
+            return match.group("version")
+    pytest.fail(
+        "the installed yt-dlp pins no yt-dlp-ejs version in a 'pin' or "
+        "'default' extra; its extras may have been restructured, so this "
+        "check needs revisiting rather than relaxing"
+    )
+
+
+def _format_selectors(site: CallSite) -> list[str]:
+    """Every format selector string this call site hands to yt-dlp."""
+    if site.options is not None:
+        selector = site.options.get("format")
+        return [] if selector is None else [str(selector)]
+    arguments = site.arguments or []
+    return [
+        value
+        for flag, value in itertools.pairwise(arguments)
+        if flag in {"-f", "--format"}
+    ]
+
+
+def _flag_value(arguments: list[str], flag: str) -> str | None:
+    for current, value in itertools.pairwise(arguments):
+        if current == flag:
+            return value
+    return None
+
+
+class TestTheProfileIsComplete:
+    def test_every_mandatory_key_is_declared(self, profile: dict[str, Any]) -> None:
+        # No key has a default. Adding one upstream therefore turns all
+        # three repositories red at once instead of passing silently in
+        # the two that did not notice.
+        missing = sorted(REQUIRED_PROFILE_KEYS - profile.keys())
+        assert not missing, f"profile is missing {missing}"
+
+    def test_no_unrecognised_key_is_declared(self, profile: dict[str, Any]) -> None:
+        # Catches a typo, which would otherwise read as a key left at
+        # no value at all.
+        allowed = REQUIRED_PROFILE_KEYS | OPTIONAL_PROFILE_KEYS
+        unknown = sorted(profile.keys() - allowed)
+        assert not unknown, f"profile declares unknown keys {unknown}"
+
+    def test_each_waiver_names_an_invariant_and_an_issue(
+        self, waivers: dict[str, str]
+    ) -> None:
+        # A waiver is the visible, countable alternative to omitting a
+        # test. One that names neither the invariant nor a ticket is an
+        # omission with extra steps.
+        for invariant, reason in waivers.items():
+            assert invariant in INVARIANT_IDS, (
+                f"waiver key {invariant!r} is not an invariant ID"
+            )
+            assert "#" in reason, f"waiver for {invariant} cites no issue: {reason!r}"
+
+
+class TestEveryInvariantIsAccountedFor:
+    def test_nothing_is_silently_uncovered(self, waivers: dict[str, str]) -> None:
+        # The spec's rule, made mechanical: an invariant with no test
+        # and no waiver is a failure, not a gap. C5 has no test here
+        # (error-message content is not visible through the adapter),
+        # so every repository has to waive it deliberately.
+        unaccounted = sorted(INVARIANT_IDS - COVERED_INVARIANTS - waivers.keys())
+        assert not unaccounted, (
+            f"{unaccounted} have neither a test in this file nor a waiver "
+            "in the profile"
+        )
+
+
+class TestTheSpecVersionIsCoupled:
+    def test_the_profile_tracks_this_copy_of_the_spec(
+        self, profile: dict[str, Any]
+    ) -> None:
+        # The red is the migration notice: a spec bump breaks every
+        # repository until someone reads what changed.
+        assert profile["spec_version"] == SPEC_VERSION
+
+
+class TestTheExtractorPinHolds:
+    INVARIANT = "C1"
+
+    def test_the_pin_is_present_and_not_empty(self, profile: dict[str, Any]) -> None:
+        assert profile["extractor_spec"], (
+            "an empty extractor spec falls back to GenericIE, which "
+            "follows off-site redirects"
+        )
+
+    def test_every_call_site_passes_the_declared_pin(
+        self, profile: dict[str, Any], call_sites: list[CallSite]
+    ) -> None:
+        # The profile is a declaration; this is the part that checks
+        # the code actually carries it, at every site rather than at
+        # the one that was easiest to remember.
+        expected = list(profile["extractor_spec"])
+        for site in call_sites:
+            if site.options is not None:
+                assert list(site.options.get("allowed_extractors") or []) == expected, (
+                    f"{site.name} does not pass the declared extractor pin"
+                )
+            else:
+                value = _flag_value(site.arguments or [], "--use-extractors")
+                assert value is not None, (
+                    f"{site.name} passes no --use-extractors, so yt-dlp's "
+                    "whole extractor registry is reachable"
+                )
+                assert value.split(",") == expected, (
+                    f"{site.name} passes --use-extractors {value!r}, which "
+                    f"is not the declared {expected}"
+                )
+
+    def test_every_declared_acceptance_is_real(self, profile: dict[str, Any]) -> None:
+        spec = profile["extractor_spec"]
+        for url in profile["accepts_urls"]:
+            assert _extractors_matching(spec, url), (
+                f"{url} is declared accepted but no pinned extractor "
+                f"matches it under {spec}"
+            )
+
+    def test_every_declared_rejection_is_real(self, profile: dict[str, Any]) -> None:
+        spec = profile["extractor_spec"]
+        for url in profile["rejects_urls"]:
+            matched = _extractors_matching(spec, url)
+            assert not matched, (
+                f"{url} is declared rejected but {matched} accepts it under {spec}"
+            )
+
+
+class TestTheChallengeSolversMatch:
+    INVARIANT = "C2"
+
+    def test_the_coupling_is_declared_one_way_or_the_other(
+        self, profile: dict[str, Any]
+    ) -> None:
+        assert profile["ejs_coupling"] in {"pinned", "absent"}
+
+    def test_the_solvers_match_the_installed_yt_dlp(
+        self, profile: dict[str, Any]
+    ) -> None:
+        if profile["ejs_coupling"] != "pinned":
+            pytest.skip("profile declares ejs_coupling = absent")
+        # Regenerating a lock after a yt-dlp bump can leave the scripts
+        # behind, and a mismatched pair fails at runtime, not here,
+        # unless something checks it.
+        assert metadata.version("yt-dlp-ejs") == _expected_ejs_version()
+
+    def test_absent_is_asserted_in_reverse(self, profile: dict[str, Any]) -> None:
+        if profile["ejs_coupling"] != "absent":
+            pytest.skip("profile declares ejs_coupling = pinned")
+        # "Not needed" has to be checked too, or the package arrives as
+        # a transitive dependency at a mismatched version and the
+        # declaration quietly becomes false.
+        with pytest.raises(metadata.PackageNotFoundError):
+            metadata.version("yt-dlp-ejs")
+
+
+class TestTheJsRuntimeIsDeclared:
+    INVARIANT = "C3"
+
+    def test_the_declaration_is_internally_consistent(
+        self, profile: dict[str, Any]
+    ) -> None:
+        runtime = profile["js_runtime"]
+        provider = profile["js_runtime_provided_by"]
+        assert provider in {"image", "host", "none"}
+        if runtime == "absent":
+            assert provider == "none", "no runtime cannot have a provider"
+        else:
+            assert provider != "none", (
+                f"{runtime} is declared but nothing is said to provide it"
+            )
+
+    def test_a_host_provided_runtime_is_actually_present(
+        self, profile: dict[str, Any]
+    ) -> None:
+        if profile["js_runtime_provided_by"] != "host":
+            pytest.skip(
+                "runtime is not host-provided; provider is "
+                f"{profile['js_runtime_provided_by']}"
+            )
+        runtime = profile["js_runtime"]
+        assert shutil.which(runtime), (
+            f"{runtime} is declared host-provided but is not on PATH; "
+            "availability has to be declared, not discovered"
+        )
+
+
+class TestControlCharactersAreNeutralised:
+    INVARIANT = "C4"
+
+    def test_no_vector_survives(self, ytdlp_subject: Any) -> None:
+        for vector in CONTROL_CHARACTER_VECTORS:
+            cleaned = ytdlp_subject.neutralize(f"title{vector}INJECTED")
+            assert vector not in cleaned, (
+                f"{vector!r} survived neutralisation: {cleaned!r}"
+            )
+
+    def test_neutralising_keeps_the_legible_text(self, ytdlp_subject: Any) -> None:
+        # A neutraliser that returns "" passes the test above and is
+        # useless, so pin the other side of it too.
+        cleaned = ytdlp_subject.neutralize(f"a{chr(0x2028)}b")
+        assert "a" in cleaned
+        assert "b" in cleaned
+
+
+class TestUrlsAreCanonicalisedBeforeYtDlp:
+    INVARIANT = "C6"
+
+    def test_an_accepted_url_survives_the_rebuild(
+        self, profile: dict[str, Any], ytdlp_subject: Any
+    ) -> None:
+        spec = profile["extractor_spec"]
+        for url in profile["accepts_urls"]:
+            rebuilt = ytdlp_subject.canonicalize(url)
+            assert rebuilt is not None, f"{url} was declared accepted"
+            # The cross-check with C1: a rebuild producing something the
+            # pin rejects is worse than no rebuild, since it turns an
+            # accepted URL into a GenericIE candidate.
+            assert _extractors_matching(spec, rebuilt), (
+                f"{url} rebuilt to {rebuilt}, which the pin rejects"
+            )
+
+    def test_a_rejected_url_reaches_no_extractor(
+        self, profile: dict[str, Any], ytdlp_subject: Any
+    ) -> None:
+        # The rebuild and the pin are two layers, and the invariant is
+        # about the pair: a rejected URL must be stopped by one of
+        # them. Requiring the rebuild alone to stop everything would be
+        # wrong as well as unmet -- measured in Youtube-Downloader,
+        # whose URL check passes "youtube.com/about/" through on
+        # purpose, because it accepts the URL as typed, while the pin
+        # matches no extractor for it.
+        spec = profile["extractor_spec"]
+        for url in profile["rejects_urls"]:
+            rebuilt = ytdlp_subject.canonicalize(url)
+            if rebuilt is None:
+                continue
+            matched = _extractors_matching(spec, rebuilt)
+            assert not matched, (
+                f"{url} is declared rejected but rebuilt to {rebuilt}, "
+                f"which {matched} accepts"
+            )
+
+
+class TestTheByteCeilingIsDeclaredAndReachable:
+    INVARIANT = "C7"
+
+    def test_the_ceiling_is_a_positive_number(self, profile: dict[str, Any]) -> None:
+        assert profile["max_bytes"] > 0
+
+    def test_every_downloading_site_constrains_the_protocol(
+        self, call_sites: list[CallSite]
+    ) -> None:
+        # Layer 1 of C7. Measured against yt-dlp's own
+        # build_format_selector, "bestaudio/best" picked an m3u8 format
+        # served by FFmpegFD, which reports no progress and so cannot
+        # be metered. The unmeterable path was the preferred pick, not
+        # an exceptional one.
+        for site in _sites_for(call_sites, DOWNLOAD):
+            selectors = _format_selectors(site)
+            assert selectors, f"{site.name} downloads but exposes no selector"
+            for selector in selectors:
+                assert _PROTOCOL_CONSTRAINT.search(selector), (
+                    f"{site.name} selector {selector!r} does not constrain "
+                    "protocol, so an unmeterable downloader can be the "
+                    "preferred pick"
+                )
+
+    def test_every_in_process_downloading_site_meters_mid_transfer(
+        self, call_sites: list[CallSite]
+    ) -> None:
+        # Layer 2, and only for sites that actually download.
+        # max_filesize is not a ceiling: downloader/http.py consults it
+        # once, before the transfer, only when Content-Length is known,
+        # and returns False rather than raising.
+        sites = _in_process(_sites_for(call_sites, DOWNLOAD))
+        if not sites:
+            pytest.skip("no in-process downloading site to check")
+        for site in sites:
+            assert site.options is not None
+            assert site.options.get("progress_hooks"), (
+                f"{site.name} has no progress_hooks, so nothing observes "
+                "the transfer while it runs and max_filesize alone is not "
+                "a ceiling"
+            )
+
+
+class TestTheTimeBoundIsExplicit:
+    INVARIANT = "C8"
+
+    def test_the_declared_timeout_is_positive(self, profile: dict[str, Any]) -> None:
+        assert profile["socket_timeout_seconds"] > 0
+
+    def test_every_call_site_sets_the_declared_timeout(
+        self, profile: dict[str, Any], call_sites: list[CallSite]
+    ) -> None:
+        expected = profile["socket_timeout_seconds"]
+        for site in call_sites:
+            if site.options is not None:
+                # Leaving it unset is not "no timeout" --
+                # networking/common.py applies DEFAULT_TIMEOUT = 20 --
+                # but it is undeclared, and an undeclared value is one
+                # nobody notices changing.
+                assert site.options.get("socket_timeout") == expected, (
+                    f"{site.name} does not set the declared socket_timeout"
+                )
+            else:
+                value = _flag_value(site.arguments or [], "--socket-timeout")
+                assert value == str(expected), (
+                    f"{site.name} passes --socket-timeout {value!r}, not "
+                    f"the declared {expected}"
+                )
+
+    def test_every_in_process_site_sets_retries_explicitly(
+        self, call_sites: list[CallSite]
+    ) -> None:
+        # retries defaults to 10 only in the CLI option parser
+        # (options.py:1025). A directly constructed YoutubeDL gets
+        # None, which utils/_utils.py:5267 turns into 0, so one
+        # transient HTTP failure fails the whole call. The subprocess
+        # sites get the CLI default and are not checked for it.
+        for site in _in_process(call_sites):
+            assert site.options is not None
+            for key in ("retries", "fragment_retries"):
+                assert site.options.get(key) is not None, (
+                    f"{site.name} leaves {key} unset, which means 0 on the "
+                    "Python API path, not the CLI's 10"
+                )
+
+
+class TestYtDlpOutputIsCaptured:
+    INVARIANT = "C9"
+
+    def test_every_in_process_site_supplies_a_logger(
+        self, call_sites: list[CallSite]
+    ) -> None:
+        # quiet does not suppress trouble(); without a logger those
+        # lines go to stderr and, in a container, nowhere.
+        for site in _in_process(call_sites):
+            assert site.options is not None
+            assert site.options.get("logger") is not None, (
+                f"{site.name} passes no logger, so yt-dlp's warnings land "
+                "on stderr instead of in the log"
+            )
+
+    def test_no_call_site_silences_warnings(self, call_sites: list[CallSite]) -> None:
+        for site in call_sites:
+            if site.options is not None:
+                assert site.options.get("no_warnings") is not True, (
+                    f"{site.name} sets no_warnings, which hides exactly the "
+                    "lines that say the toolchain is degraded"
+                )
+            else:
+                assert "--no-warnings" not in (site.arguments or []), (
+                    f"{site.name} passes --no-warnings"
+                )
+
+
+class TestErrorTextCouplingIsPinned:
+    INVARIANT = "C10"
+
+    def test_any_marker_coupling_names_the_version_it_was_checked_against(
+        self, profile: dict[str, Any]
+    ) -> None:
+        verified = profile["markers_verified_against"]
+        if verified == "none":
+            pytest.skip("profile declares no coupling to yt-dlp's text")
+        installed = metadata.version("yt-dlp")
+        assert verified == installed, (
+            f"error-text matching was verified against yt-dlp {verified} "
+            f"but {installed} is installed; re-verify the markers rather "
+            "than bumping this string"
+        )
+
+
+class TestThePoTokenHookIsNotHalfApplied:
+    def test_the_environment_and_the_profile_agree(
+        self, profile: dict[str, Any]
+    ) -> None:
+        hook = profile["po_token_hook"]
+        assert hook in {"absent", "env"}
+        if hook == "absent":
+            # Catches the half-applied configuration: a token supplied
+            # to a deployment whose code has no mount point for it
+            # would otherwise be silently ignored.
+            assert not os.environ.get("YTDLP_PO_TOKEN"), (
+                "YTDLP_PO_TOKEN is set but the profile says the hook is "
+                "absent, so the token is being ignored"
+            )
+
+
+# --- ytdlp-conformance:canonical-end ---

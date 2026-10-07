@@ -1,0 +1,111 @@
+"""The ``ytdlp_subject`` fixture the conformance test reaches through.
+
+Append this to the repository's ``conftest.py`` and fill in the three
+members with that repository's own functions. The conformance test
+imports nothing from the repository under test: this adapter is the
+single seam, which is what lets the test itself stay byte-identical in
+all three repositories while the code around it differs completely.
+
+Nothing here is shared, so nothing here is hashed. Edit it freely.
+
+The bodies below are wired to Youtube-Downloader as a worked example.
+Note what it declares and what it does not: that repository drives
+yt-dlp in-process only to read metadata, and every byte it downloads
+goes through a subprocess. Saying so is the point of ``purpose`` --
+a site that only extracts cannot be asked to meter a transfer, and a
+site that downloads cannot be excused from it.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+# Replace with this repository's own names.
+from app.services.youtube import (  # type: ignore[import-not-found]
+    AUDIO_TRACK_FORMAT,
+    VIDEO_FORMAT_SORT,
+    InvalidURLError,
+    _base_opts,
+    _build_ytdlp_command,
+    _neutralize_control_chars,
+    _resolve_video_format,
+    normalize_youtube_url,
+)
+
+# CallSite and the two purpose constants live in the copied test, so
+# that all three repositories validate their declarations the same way.
+# This spelling works under pytest's default (prepend) import mode,
+# where the test file's directory goes on sys.path; make it a relative
+# or package-qualified import if the repository sets
+# importmode=importlib or keeps an __init__.py in its test package.
+from test_ytdlp_conformance import DOWNLOAD, EXTRACT, CallSite
+
+_SAMPLE_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+
+class YtDlpSubject:
+    """What the conformance test needs to know about this repository."""
+
+    def call_sites(self) -> list[CallSite]:
+        """Every place this repository hands work to yt-dlp.
+
+        List them all, not a representative one. The checks that run
+        per site are the ones a single forgotten call site silently
+        defeats: an extractor pin applied in three places out of four
+        is the shape of the failure this is here to catch.
+        """
+        sort = ["-S", VIDEO_FORMAT_SORT]
+        return [
+            CallSite(
+                name="extract_video_info",
+                purpose=EXTRACT,
+                options=_base_opts() | {"noplaylist": True},
+            ),
+            CallSite(
+                name="extract_playlist_info",
+                purpose=EXTRACT,
+                options=_base_opts()
+                | {"extract_flat": "in_playlist", "noplaylist": False},
+            ),
+            CallSite(
+                name="video stream",
+                purpose=DOWNLOAD,
+                arguments=_build_ytdlp_command(
+                    [_SAMPLE_URL], _resolve_video_format("best"), sort
+                ),
+            ),
+            CallSite(
+                name="audio track",
+                purpose=DOWNLOAD,
+                arguments=_build_ytdlp_command(
+                    [_SAMPLE_URL], AUDIO_TRACK_FORMAT, sort
+                ),
+            ),
+        ]
+
+    def canonicalize(self, url: str) -> str | None:
+        """The rebuilt URL, or ``None`` when this repository refuses it.
+
+        ``None`` must mean refused: a function that raises is wrapped
+        here, because the test reads ``None`` as the declared rejection
+        and an exception as a bug.
+
+        Returning a URL is not a claim that the URL is safe. This
+        repository takes the URL as the user typed it, so the rebuild
+        only lowercases scheme and host and lets "/about/" through; the
+        extractor pin is what refuses that one. The test checks the
+        pair, not either layer alone.
+        """
+        try:
+            return normalize_youtube_url(url)
+        except InvalidURLError:
+            return None
+
+    def neutralize(self, text: str) -> str:
+        """Remote-controlled text, made safe to display or log."""
+        return _neutralize_control_chars(text)
+
+
+@pytest.fixture(scope="session")
+def ytdlp_subject() -> YtDlpSubject:
+    return YtDlpSubject()
