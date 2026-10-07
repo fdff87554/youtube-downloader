@@ -545,7 +545,7 @@ def _progressive_mp4(path: pathlib.Path, *, moov_first: bool) -> pathlib.Path:
 def _assert_carries_the_ffmpeg_reason(message: str) -> None:
     """The failure has to say *why*, not just that a stage exited non-zero.
 
-    ``_raise_stage_failure`` builds its detail as
+    ``_raise_from_subprocess_failure`` builds its detail as
     ``" | ".join(stderr_tail) or f"exited with code {returncode}"``, so a
     stage run under ``-v quiet`` still raises "ffmpeg failed" -- with the
     fallback string and no cause at all. The absence of that fallback is
