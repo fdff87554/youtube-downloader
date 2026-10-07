@@ -542,6 +542,11 @@ def _progressive_mp4(path: pathlib.Path, *, moov_first: bool) -> pathlib.Path:
     return path
 
 
+def _audio_source(audio: list[str]):
+    """Patch the mp3 path's single command: one yt-dlp handing over audio."""
+    return patch("app.services.youtube._build_audio_command", return_value=audio)
+
+
 def _cat(path: pathlib.Path) -> list[str]:
     # Stands in for yt-dlp handing over a single progressive format,
     # which it writes to stdout unchanged.
@@ -582,6 +587,42 @@ class TestProgressiveFallbackThroughTheRemux:
             pytest.raises(YouTubeError, match="ffmpeg failed"),
         ):
             b"".join(stream_download("https://www.youtube.com/watch?v=test", "mp4"))
+
+
+@needs_ffmpeg
+class TestProgressiveFallbackThroughTheMp3Stage:
+    """``bestaudio/best`` can fall back to a progressive MP4 on this path too.
+
+    #114 fixed the remux stage; this is the same shape one stage over, and
+    it reproduces: piping a moov-last progressive MP4 into the previous mp3
+    command gave exit 0 and a 143-byte file with no audio. ``-v quiet`` made
+    it worse than the mp4 case -- nothing was written to stderr either, so
+    the failure left no trace to put in the error detail.
+    """
+
+    def test_moov_first_is_converted(self, tmp_path: pathlib.Path) -> None:
+        source = _progressive_mp4(tmp_path / "head-audio.mp4", moov_first=True)
+
+        with _audio_source(_cat(source)):
+            output = b"".join(
+                stream_download("https://www.youtube.com/watch?v=test", "mp3")
+            )
+
+        # An MPEG audio frame starts with eleven set bits; the previous
+        # command's 143-byte output carried an ID3 header and no frame.
+        assert len(output) > 10_000
+        assert b"\xff\xfb" in output[:4096] or b"\xff\xf3" in output[:4096]
+
+    def test_moov_last_fails_instead_of_serving_an_empty_file(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        source = _progressive_mp4(tmp_path / "tail-audio.mp4", moov_first=False)
+
+        with (
+            _audio_source(_cat(source)),
+            pytest.raises(YouTubeError, match="ffmpeg failed"),
+        ):
+            b"".join(stream_download("https://www.youtube.com/watch?v=test", "mp3"))
 
 
 class TestFailureBeforeTheFirstChunkIsSent:

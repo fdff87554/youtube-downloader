@@ -533,6 +533,13 @@ def _mp3_command(inputs: Sequence[str]) -> list[str]:
     return [
         "ffmpeg",
         "-nostdin",
+        # Same failure the remux stage hit in #114, reproduced on this path:
+        # feeding a progressive MP4 whose moov sits after the samples gives
+        # exit 0 and a 143-byte file with no audio, which the service then
+        # serves as a successful download. bestaudio/best can fetch one, so
+        # the fallback reaches here. With -xerror ffmpeg exits non-zero and
+        # the stream fails instead.
+        "-xerror",
         "-i",
         inputs[0],
         # bestaudio/best can resolve to a progressive stream that still
@@ -542,8 +549,10 @@ def _mp3_command(inputs: Sequence[str]) -> list[str]:
         "mp3",
         "-ab",
         "192k",
+        # error, not quiet: the stderr tail becomes the failure's detail, and
+        # under quiet the above failed with nothing written anywhere at all.
         "-v",
-        "quiet",
+        "error",
         "pipe:1",
     ]
 
