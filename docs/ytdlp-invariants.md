@@ -175,7 +175,12 @@ mandatory; none has a default.
   repository declares", so the declaration has to be data, not prose.
   C6 reuses the same two lists: an accepted URL must survive the
   canonical rebuild and still pass the pin, and a rejected one must be
-  refused by the rebuild.
+  refused by the rebuild **or** by the pin. The pair is the invariant,
+  not either layer alone -- measured here, the URL check passes
+  `youtube.com/about/` through on purpose, because this project accepts
+  the URL as the user typed it, and the pin is what matches no
+  extractor for it. What must never happen is a declared rejection
+  reaching an extractor.
 - `cachedir` -- `false`, or the path. Not unified; see
   [Evaluated and not adopted](#evaluated-and-not-adopted).
 - `codec_policy` -- `h264-preferred`, `h264-forced`, `audio-only`, or
