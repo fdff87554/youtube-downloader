@@ -18,6 +18,8 @@ the adapter described below.
   filled in.
 - `check-conformance-drift.sh` is copied as-is and run from the
   repository root in CI.
+- `conformance_xfail_plugin.py` is copied **next to that script**,
+  which is where the script adds it to `PYTHONPATH` from.
 
 `report-sibling-profiles.sh` is **not** copied. It runs only in this
 repository, which is the canonical home; see
@@ -156,8 +158,8 @@ It checks two things, both offline:
 
 - the canonical region still hashes to `canonical_region_sha256`;
 - no more collected items carry an `xfail` marker than `xfail_budget`
-  allows, counted by asking pytest:
-  `pytest <test> -m xfail --collect-only -q`.
+  allows, counted by `conformance_xfail_plugin.py` inside a
+  collect-only pytest run.
 
 Add it as a CI step next to the test run, with the project's test
 environment active:
@@ -183,13 +185,32 @@ grepped for `pytest.mark.xfail`, reported `0/0 xfail` and exited 0 while
 pytest reported `3 skipped, 4 xfailed, 21 xpassed`. Putting the count in
 a test inside the conformance module does not fix it either: those same
 two lines mark that test too, so its failure is reported as an `xfail`
-and the run stays green. A check cannot police the module it lives in.
+and the run stays green. A check cannot police the module it lives in,
+and a hook defined in a test module is not called at all.
+
+**And it is read by a plugin, not parsed out of pytest's output.** A
+version that grepped the collect-only listing made the answer depend on
+how the test path was spelled and on how verbose pytest happened to be.
+Measured on a module with 35 `xfail` items:
+
+| Invocation                          | Reported             |
+| ----------------------------------- | -------------------- |
+| `tests/test_ytdlp_conformance.py`   | 35, failed correctly |
+| `./tests/test_ytdlp_conformance.py` | 0, exit 0            |
+| an absolute path                    | 0, exit 0            |
+| standard path, `PYTEST_ADDOPTS=-q`  | 0, exit 0            |
+
+The plugin reads the collected items directly. Every item collected
+belongs to the one path the script passed, so there is nothing to
+filter and no path to compare against. A missing count file is a
+failure rather than a count of zero, so the plugin failing to run
+cannot read as a clean module.
 
 Verified against the three routes a marker can arrive by -- an explicit
 decorator, an aliased module-level `pytestmark`, and
-`pytest_collection_modifyitems` in a `conftest.py` -- plus a
-non-integer budget, which an earlier version reported as a shell error
-and then exited 0 on.
+`pytest_collection_modifyitems` in a `conftest.py` -- each of the four
+invocations above, a missing plugin, and a non-integer budget, which an
+earlier version reported as a shell error and then exited 0 on.
 
 The third layer runs only here: `report-sibling-profiles.sh` reads each
 public sibling's declared `spec_version` and `canonical_region_sha256`
