@@ -257,12 +257,28 @@ def _selected_formats(
     return list(ydl.build_format_selector(selector)(info))
 
 
+def _transfer_components(formats: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each separately downloaded stream behind a selection.
+
+    A ``video+audio`` selection comes back as one merged entry whose
+    ``requested_formats`` holds the parts that are actually fetched, and
+    whose own ``protocol`` is their names joined: ``https+m3u8_native``.
+    Reading only that top-level field is how an HLS audio track passed
+    for metered -- it begins with "http", so the string test said yes.
+    """
+    components = []
+    for entry in formats:
+        parts = entry.get("requested_formats")
+        components.extend(parts if parts else [entry])
+    return components
+
+
 def _unmetered(formats: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """The picked formats whose protocol no Python-side downloader meters."""
+    """The downloaded components no Python-side downloader can meter."""
     return [
-        (str(entry.get("format_id")), str(entry.get("protocol") or ""))
-        for entry in formats
-        if not str(entry.get("protocol") or "").startswith(_METERED_PROTOCOL_PREFIXES)
+        (str(part.get("format_id")), str(part.get("protocol") or ""))
+        for part in _transfer_components(formats)
+        if not str(part.get("protocol") or "").startswith(_METERED_PROTOCOL_PREFIXES)
     ]
 
 
@@ -386,6 +402,7 @@ ASPECT_OF_TEST = {
     "test_the_ceiling_is_a_positive_number": "C7.metered",
     "test_every_downloading_site_rejects_unmeterable_formats": "C7.selectable",
     "test_no_downloading_selector_falls_back_to_an_unmeterable_format": "C7.selectable",
+    "test_a_mixed_selection_is_judged_by_its_components": "C7.selectable",
     "test_every_in_process_downloading_site_meters_mid_transfer": "C7.metered",
     "test_a_metering_hook_lets_a_transfer_within_the_ceiling_through": "C7.metered",
     "test_the_declared_timeout_is_positive": "C8.socket",
@@ -797,6 +814,22 @@ class TestTheByteCeilingIsDeclaredAndReachable:
                     "no Python-side downloader meters those protocols, so "
                     "the byte ceiling cannot hold on them"
                 )
+
+    def test_a_mixed_selection_is_judged_by_its_components(self) -> None:
+        # A guard on the checker, not on the repository. A video+audio
+        # selection arrives as one merged entry whose own protocol is
+        # the parts joined -- "https+m3u8_native" -- which begins with
+        # "http" and so passed a check that read only that field. If
+        # this stops holding, every mixed selector above is being
+        # waved through.
+        selector = "bestvideo[protocol^=http]+bestaudio/best[protocol^=http]"
+        chosen = _selected_formats(selector, None, _mixed_pool())
+        assert chosen, "the pool could not exercise a mixed selector"
+        assert _unmetered(chosen), (
+            f"{selector!r} selects an HLS audio track alongside an HTTPS "
+            "video stream, and the check did not notice; it is reading the "
+            "merged entry's protocol instead of its components"
+        )
 
     def test_no_downloading_selector_falls_back_to_an_unmeterable_format(
         self, call_sites: list[CallSite]
