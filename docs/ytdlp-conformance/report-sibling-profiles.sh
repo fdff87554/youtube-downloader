@@ -31,8 +31,6 @@ MANIFEST_PATHS=(
 	"backend/pyproject.toml"
 )
 
-SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
-
 # A literal backtick, for the markdown code span around each hash. Held
 # in a variable because an inline backtick in a printf format reads as a
 # command substitution to shellcheck and to a human skimming the line.
@@ -69,11 +67,18 @@ print(f"{version}\t{region}")
 PY
 }
 
+# Built up in a file so that the same text reaches two places: the job
+# summary, where it renders as a table, and stdout, where it shows up
+# for anyone reading the log. The first run of this job wrote only to
+# the summary and so printed nothing at all into the log, which made
+# "every run shows these lines" true only of the summary page.
+report="$workdir/report.md"
+
 {
 	printf '## yt-dlp conformance profiles\n\n'
 	printf '| repository | spec_version | canonical region |\n'
 	printf '| --- | --- | --- |\n'
-} >>"$SUMMARY"
+} >"$report"
 
 for repo in "${SIBLINGS[@]}"; do
 	manifest=""
@@ -87,14 +92,19 @@ for repo in "${SIBLINGS[@]}"; do
 	done
 
 	if [ -z "$manifest" ]; then
-		printf '| %s | no manifest found | - |\n' "$repo" >>"$SUMMARY"
+		printf '| %s | no manifest found | - |\n' "$repo" >>"$report"
 		continue
 	fi
 
 	IFS=$'\t' read -r version region < <(read_profile "$manifest")
 	printf '| %s | %s | %s |\n' \
-		"$repo" "$version" "${TICK}${region:0:12}${TICK}" >>"$SUMMARY"
+		"$repo" "$version" "${TICK}${region:0:12}${TICK}" >>"$report"
 done
 
 printf '\nReport only. See docs/ytdlp-invariants.md for why voice-forge is absent.\n' \
-	>>"$SUMMARY"
+	>>"$report"
+
+cat "$report"
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+	cat "$report" >>"$GITHUB_STEP_SUMMARY"
+fi
