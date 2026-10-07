@@ -228,8 +228,10 @@ mandatory; none has a default.
   each binary.
 - `waivers` -- a table of named deviations, keyed by aspect; see
   [Aspects](#aspects) and [Waivers](#waivers) below.
-- `xfail_budget` -- the maximum number of `xfail` markers the
-  conformance test may carry.
+- `xfail_budget` -- the maximum number of **collected test items in
+  the conformance module that carry an `xfail` marker**. Items, not
+  marker expressions: one `pytestmark` neutralises a whole module, and
+  counting expressions would call that one.
 
 ### Aspects
 
@@ -316,12 +318,31 @@ access to a private repository. That was judged the wrong trade against
 least privilege, so voice-forge is covered by layers 1 and 2 -- which
 run inside its own CI and are the strong ones -- plus manual review.
 
-The `xfail` list is the backlog, and it may only shrink: the drift
-script fails when the number of `xfail` markers exceeds
-`xfail_budget`. Lowering the budget is a visible one-line diff, and so
-is raising it, which is the intent. The original plan compared against
-the previous commit; a recorded budget replaces that, because CI clones
-are shallow and a check that cannot run is not a check.
+The `xfail` list is the backlog, and it may only shrink: the budget is
+enforced as a test, which fails when more collected items in the
+conformance module carry an `xfail` marker than `xfail_budget` allows.
+Lowering the budget is a visible one-line diff, and so is raising it,
+which is the intent. The original plan compared against the previous
+commit; a recorded budget replaces that, because CI clones are shallow
+and a check that cannot run is not a check.
+
+**The budget is counted from pytest's collection, not from the file's
+text.** A text scan cannot see what pytest sees, and the gap is not
+theoretical: two lines outside the hashed region --
+
+```python
+from pytest import mark
+
+pytestmark = mark.xfail(strict=False, reason="...")
+```
+
+-- turn every test in the module into an `xfail`, while a `grep` for
+`pytest.mark.xfail` finds nothing. Measured against an earlier
+text-scanning version: it reported `0/0 xfail` and exited 0 while
+pytest reported `3 skipped, 4 xfailed, 21 xpassed`. The whole
+conformance suite was neutralised and the drift check called it clean.
+Reading the collected markers covers that, aliased imports, and
+markers applied from a `conftest.py`.
 
 ## Measurement record
 
