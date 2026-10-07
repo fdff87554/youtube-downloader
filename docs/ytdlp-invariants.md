@@ -226,24 +226,65 @@ mandatory; none has a default.
   all three.
 - `needs_ffmpeg`, `needs_ffprobe` -- whether the repository requires
   each binary.
-- `waivers` -- a table of named deviations; see below.
+- `waivers` -- a table of named deviations, keyed by aspect; see
+  [Aspects](#aspects) and [Waivers](#waivers) below.
 - `xfail_budget` -- the maximum number of `xfail` markers the
   conformance test may carry.
 
+### Aspects
+
+Two of the invariants are not one check. C7 asks for a ceiling that
+holds on _every_ downloader path, and C8 for a bound on the whole
+download; each decomposes, and a test that covers one part must not be
+counted as covering the invariant. So the accounting unit is an
+**aspect**:
+
+- `C7.selectable` -- no format selector, on any fallback branch, can
+  choose an unmeterable downloader.
+- `C7.metered` -- the transfer is observed while it runs, and exceeding
+  the ceiling stops it.
+- `C7.landed` -- the finished bytes are measured before they are
+  published or served.
+- `C8.socket` -- the per-operation socket timeout is declared, not
+  inherited.
+- `C8.retries` -- download call sites set `retries` and
+  `fragment_retries`.
+- `C8.deadline` -- the whole download has a wall-clock bound.
+
+The other invariants are single aspects and are referred to by their
+bare ID. The conformance test declares which aspects it checks
+mechanically; every aspect it does not check must be waived.
+
+Three are **not** mechanically checkable from the shared adapter
+surface today, so every repository waives them explicitly:
+
+- `C5` -- error-message content is not visible through the adapter.
+- `C7.landed` -- a repository that streams its media never lands a
+  file, and one that does exposes no hook for the shared test to
+  inspect.
+- `C8.deadline` -- none of the three has a wall-clock bound today, and
+  a shared test cannot invent the mechanism it would check.
+
+Naming them here, rather than leaving them off the list, is the point:
+an aspect that nobody has to waive is an aspect nobody counts.
+
 ### Waivers
 
-A repository that cannot satisfy an invariant does not silently omit
-it. It records a waiver keyed by invariant ID, with a named reason and
-an issue link:
+A repository that cannot satisfy an aspect does not silently omit it.
+It records a waiver keyed by aspect, with a named reason and an issue
+link:
 
 ```toml
 [tool.ytdlp_conformance.waivers]
 C3 = "deno comes from the container image; see youtube-downloader#NNN"
+"C8.deadline" = "no wall-clock bound on a streamed response; see #NNN"
 ```
 
 Waivers are visible, countable and greppable, which is the whole
-requirement. An invariant with no waiver and no passing test is a
-failure, not a gap.
+requirement. An aspect with no waiver and no passing test is a
+failure, not a gap -- and because the aspect list lives here rather
+than in each repository, adding one upstream turns all three red until
+each decides whether to implement it or waive it.
 
 ## Drift control
 
