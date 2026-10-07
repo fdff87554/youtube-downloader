@@ -99,8 +99,18 @@ shared test cannot check them: `C5` (error-message content is not
 visible through the adapter), `C7.landed` (a repository that streams
 its media lands no file, and one that does exposes no hook for a shared
 test), and `C8.deadline` (none of the three has a wall-clock bound, and
-a shared test cannot invent the mechanism it would check). Each needs
-an issue link.
+a shared test cannot invent the mechanism it would check).
+
+A fourth, **`C7.external`, is required of any repository that downloads
+through a subprocess**, because a subprocess takes its options as argv
+and reports nothing back: the shared test can neither watch the
+transfer nor measure what landed. What covers that aspect is a test
+that demands the waiver. Checking the argv for `--max-filesize`
+instead was considered and rejected -- it is consulted once,
+pre-transfer, only with a known `Content-Length`, so asserting its
+presence would record conformance that is not there.
+
+Each waiver needs an issue link.
 
 ## Filling in the profile
 
@@ -152,10 +162,26 @@ Two keys need a word of warning:
   `bestaudio[protocol^=http]/best` passes the first pool, because its
   first branch matches and its unconstrained second branch is never
   reached.
-- `C7.metered` drives each `progress_hooks` callback with a status past
-  the ceiling and requires it to raise, then with one inside the
-  ceiling and requires it not to. Asserting that the hook list is
-  non-empty passes for a hook that does nothing.
+
+  Both pools carry 1080p, 720p and 480p, so a tier-limited selector is
+  judged on its merits rather than failing for want of a format. And a
+  `video+audio` selection is judged by its `requested_formats`, not by
+  the merged entry, whose own protocol is the parts joined --
+  `https+m3u8_native` begins with `http`, which is how an HLS audio
+  track once passed for metered.
+
+- `C7.metered` **drives** the `progress_hooks` as a set rather than
+  counting them, because `downloader/common.py` calls every hook in
+  order with the same status object, so one of them raising is what
+  stops the transfer. Requiring each hook to raise individually rejects
+  a legitimate `[observer, guard]` pair.
+
+  Four shapes of oversized event are used: length reported, length
+  `None`, length absent, and a `finished` event. The first alone is not
+  enough -- `total_bytes` is Content-Length, so a hook reading only
+  that one passes while being unable to stop a transfer of unknown
+  length, which is the case the ceiling exists for.
+
 - It reaches two of yt-dlp's private attributes, `_ies` and
   `_js_runtimes`. Both are guarded with `hasattr` and **fail** rather
   than skip when they are missing, because a silent skip is the failure
