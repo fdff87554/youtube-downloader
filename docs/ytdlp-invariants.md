@@ -265,8 +265,12 @@ counted as covering the invariant. So the accounting unit is an
 
 - `C7.selectable` -- no format selector, on any fallback branch, can
   choose an unmeterable downloader.
-- `C7.metered` -- the transfer is observed while it runs, and exceeding
-  the ceiling stops it.
+- `C7.metered` -- a transfer driven in-process is observed while it
+  runs, and exceeding the ceiling stops it.
+- `C7.external` -- a transfer driven as a subprocess has a byte bound
+  too. The shared test cannot observe one, so this aspect exists to be
+  waived, by name, by any repository that downloads through a
+  subprocess.
 - `C7.landed` -- the finished bytes are measured before they are
   published or served.
 - `C8.socket` -- the per-operation socket timeout is declared, not
@@ -288,6 +292,22 @@ surface today, so every repository waives them explicitly:
   inspect.
 - `C8.deadline` -- none of the three has a wall-clock bound today, and
   a shared test cannot invent the mechanism it would check.
+
+`C7.external` joins them for any repository with a subprocess download
+site, which is every repository here except on its in-process paths.
+The reason it is a waiver rather than a check: the only thing visible
+from an argv is `--max-filesize`, and
+[that is not a ceiling](#why-c7-needs-more-than-max_filesize) -- it is
+consulted once, pre-transfer, only with a known `Content-Length`.
+Asserting its presence would record conformance that does not exist,
+which is worse than recording the gap. Until the adapter can observe a
+subprocess transfer, the honest answer is a named waiver with an issue
+behind it.
+
+Splitting `C7.external` out rather than widening `C7.metered` is
+deliberate: a repository that meters its in-process downloads correctly
+and also shells out for one keeps the credit for the part it does, and
+waives only the part nobody can see.
 
 Naming them here, rather than leaving them off the list, is the point:
 an aspect that nobody has to waive is an aspect nobody counts.
