@@ -16,6 +16,14 @@ the adapter described below.
   in.
 - `pyproject-profile.toml.example` is appended to `pyproject.toml` and
   filled in.
+- `check-conformance-drift.sh` is copied as-is and run from the
+  repository root in CI.
+- `conformance_xfail_plugin.py` is copied **next to that script**,
+  which is where the script adds it to `PYTHONPATH` from.
+
+`report-sibling-profiles.sh` is **not** copied. It runs only in this
+repository, which is the canonical home; see
+[Drift control](#drift-control) below.
 
 Drop the `.example` suffix on the first one. Keep its name
 `test_ytdlp_conformance.py`, because the drift check looks for it.
@@ -142,6 +150,126 @@ Two keys need a word of warning:
   yt-dlp moves. That is the intent -- the coupling gets re-verified
   deliberately. Do not bump the string to clear the red; re-check the
   markers and then bump it.
+
+## Drift control
+
+`check-conformance-drift.sh` is the part that runs in each repository.
+It checks two things, both offline:
+
+- the canonical region still hashes to `canonical_region_sha256`;
+- no more collected items carry an `xfail` marker than `xfail_budget`
+  allows, counted by `conformance_xfail_plugin.py` inside a
+  collect-only pytest run.
+
+Add it as a CI step next to the test run, with the project's test
+environment active:
+
+```bash
+bash check-conformance-drift.sh tests/test_ytdlp_conformance.py pyproject.toml
+```
+
+Both arguments are optional and default to those values.
+
+**The budget is counted by pytest, and from outside the test module, on
+purpose.** A text scan cannot see what pytest sees, and the gap is
+exploitable with ordinary pytest: two lines outside the hashed region --
+
+```python
+from pytest import mark
+
+pytestmark = mark.xfail(strict=False, reason="...")
+```
+
+-- turn every test in the module into an `xfail`. An earlier version
+grepped for `pytest.mark.xfail`, reported `0/0 xfail` and exited 0 while
+pytest reported `3 skipped, 4 xfailed, 21 xpassed`. Putting the count in
+a test inside the conformance module does not fix it either: those same
+two lines mark that test too, so its failure is reported as an `xfail`
+and the run stays green. A check cannot police the module it lives in,
+and a hook defined in a test module is not called at all.
+
+**And it is read by a plugin, not parsed out of pytest's output.** A
+version that grepped the collect-only listing made the answer depend on
+how the test path was spelled and on how verbose pytest happened to be.
+Measured on a module with 35 `xfail` items:
+
+| Invocation                          | Reported             |
+| ----------------------------------- | -------------------- |
+| `tests/test_ytdlp_conformance.py`   | 35, failed correctly |
+| `./tests/test_ytdlp_conformance.py` | 0, exit 0            |
+| an absolute path                    | 0, exit 0            |
+| standard path, `PYTEST_ADDOPTS=-q`  | 0, exit 0            |
+
+The plugin reads the collected items directly. Every item collected
+belongs to the one path the script passed, so there is nothing to
+filter and no path to compare against. A missing count file is a
+failure rather than a count of zero, so the plugin failing to run
+cannot read as a clean module.
+
+**And it counts from `pytest_collection_finish`, not from
+`pytest_collection_modifyitems`.** A `conftest.py` may add markers from
+its own `pytest_collection_modifyitems`, and counting from that same
+hook made the answer depend on which implementation ran first.
+Measured on a module of 3 items marked from a `conftest.py`:
+
+| `conftest.py` hook    | `modifyitems` | `collection_finish` |
+| --------------------- | ------------- | ------------------- |
+| plain                 | 3             | 3                   |
+| `@hookimpl(tryfirst)` | 3             | 3                   |
+| `@hookimpl(trylast)`  | 0             | 3                   |
+| no marker             | 0             | 0                   |
+
+A plain conftest hook happens to run first -- pluggy calls the
+last-registered implementation first, and a `conftest.py` is registered
+after a `-p` plugin -- which is why this held. It was never stated and
+never measured. `trylast=True` was enough to break it: all 39 items
+marked, the script reporting `0/0` and exiting 0.
+`pytest_collection_finish` is called once collection is complete, so no
+ordering inside `pytest_collection_modifyitems` can reach it.
+
+**What the count still cannot see**: a marker added at run time, as
+from `pytest_runtest_setup`. A collect-only run never gets there --
+measured at `0` while the real run reported `3 xpassed`. Counting those
+means running the suite, which this check deliberately does not do, so
+the boundary is recorded here rather than closed. The suite's own run,
+next to this check in CI, does report them.
+
+`backend/tests/test_conformance_xfail_plugin.py` holds all of the above
+as tests: the three hook orderings, an aliased module-level
+`pytestmark`, an explicit decorator, the four invocations, an unmarked
+module counting zero, and no count file when the destination variable
+is unset. A missing plugin and a non-integer budget -- which an earlier
+version reported as a shell error and then exited 0 on -- are checked
+by the script itself.
+
+The third layer runs only here: `report-sibling-profiles.sh` reads each
+public sibling's declared `spec_version` and `canonical_region_sha256`
+through the GitHub API and prints them into the job summary. It is
+report-only and the job sets `continue-on-error`, because a pull request
+in one repository should not be blocked by another's state. A repository
+that has not adopted the spec reports as `not declared` rather than
+failing the step -- a check that goes red for a reason nobody can act on
+is a check people learn to ignore.
+
+Report-only is not the same as silent. Each row says which of three
+things happened, and a failed query carries the error with it:
+
+| Row                  | Meaning                                             |
+| -------------------- | --------------------------------------------------- |
+| a version and a hash | the profile was read                                |
+| `not declared`       | the repository has no `[tool.ytdlp_conformance]`    |
+| `no manifest found`  | the API returned 404 for every candidate path       |
+| `unavailable`        | the query failed, with the error in the next column |
+
+Collapsing those is how a broken token comes to look like a sibling
+that has not adopted the spec -- which is what the first version did,
+reporting `no manifest found` for an HTTP 401.
+
+It covers this repository and Whisper-UI, and not voice-forge, which is
+private: reading it from a public repository's CI would mean holding a
+credential with read access to a private repository. voice-forge runs
+the first two layers in its own CI, which are the stronger two. The gap
+is written down in the spec so that it stays countable.
 
 ## What this test does not cover
 
