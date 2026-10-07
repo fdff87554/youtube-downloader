@@ -108,12 +108,34 @@ rather than raising. A chunked response, or any downloader that does
 not meter, walks straight past it. C7 therefore needs three layers, and
 a repository that claims C7 with only `max_filesize` does not conform:
 
-1. Make unmeterable downloaders unselectable. A format selector with no
-   protocol constraint can _prefer_ one. Measured against yt-dlp's own
-   `build_format_selector`, `bestaudio/best` picked `hls-ffmpeg`
-   (protocol `m3u8`), while adding `[protocol^=http]` to both branches
-   picked `https-a`. The unmeterable path was the preferred pick, not an
-   edge case.
+1. Make unmeterable downloaders unselectable, **on every fallback
+   branch**. A selector with no protocol constraint does not merely
+   allow an unmeterable format, it can prefer one: measured against
+   yt-dlp's own `build_format_selector`, `bestaudio/best` picked
+   `hls-ffmpeg` (protocol `m3u8`), while adding `[protocol^=http]` to
+   both branches picked `https-a`.
+
+   The mechanism, which is what makes this general rather than one
+   observation: `proto` sits late in yt-dlp's default sort order,
+
+   ```text
+   hasaud, lang, quality, tbr, filesize, vbr, height, width, proto, ...
+   ```
+
+   so protocol only breaks a tie once bitrate, filesize and resolution
+   are equal. Comparing two renditions that are identical in all of
+   those will show `https` winning and invite the conclusion that the
+   unmeterable path is unreachable. Give the HLS rendition a higher
+   `tbr` and it wins, under a project's own `format_sort` too. "Only
+   when nothing else is offered" is the wrong reading, and a
+   measurement on an equal-quality pair is how one arrives at it.
+
+   This also means the constraint has to be checked by **evaluating**
+   each selector, not by looking for the text of a protocol filter:
+   `bestaudio[protocol^=http]/best` contains one and still falls back
+   to an unconstrained branch, and `best[protocol=m3u8]` contains one
+   that selects exactly the wrong thing.
+
 2. Meter mid-transfer in a `progress_hooks` callback, keyed per output
    filename so the count survives a retry.
 3. Verify the landed file on disk and refuse to publish it when it is
@@ -136,22 +158,47 @@ applies it. It is a per-operation socket timeout, though, not a bound
 on the whole download, and a spec that conflates the two invites
 exactly the wrong fix.
 
-The real gap found next to it: `retries` and `fragment_retries` default
-to 10 **only in the CLI option parser** (`yt_dlp/options.py:1025`). A
-directly constructed `YoutubeDL(params)` gets `None`, and
-`yt_dlp/utils/_utils.py:5267` turns that into `0`. Measured:
+### Three kinds of retry, and the one that defaults to nothing
+
+yt-dlp has three retry budgets, and they are not interchangeable. The
+distinction matters because `retries` looks like the general one and is
+not.
+
+- **Extraction** uses `extractor_retries`, which
+  `extractor/common.py:4072` defaults to 3:
+  `RetryManager(self.get_param('extractor_retries', 3), ...)`. The
+  YouTube extractor uses it in `youtube/_base.py:981`
+  (`_download_webpage_with_retries`) and `:1287-1289`
+  (`_extract_response`, the API JSON path behind player responses and
+  playlist browsing). A caller that sets nothing therefore still gets
+  four attempts at metadata.
+- **Media download** uses `retries`, read by
+  `downloader/http.py:360` as `RetryManager(self.params.get('retries'), ...)`.
+- **Fragment download** uses `fragment_retries`, the same story per
+  fragment.
+
+The last two default to 10 **only in the CLI option parser**
+(`options.py:1025`). A directly constructed `YoutubeDL(params)` gets
+`None`, and `utils/_utils.py:5267` turns that into `0`. Measured:
 
 ```text
-CLI defaults                      -> retries: 10   fragment_retries: 10
-Python API params.get('retries')  -> None
-RetryManager(None).retries        -> 0
-RetryManager(10).retries          -> 10
+params.get('retries')                        -> None
+RetryManager(retries=None)                   -> 1 attempt
+get_param('extractor_retries', 3)            -> 3
+RetryManager(extractor_retries=3)            -> 4 attempts
 ```
 
-So a Python API caller that never sets `retries` has no HTTP retry at
-all: one transient failure fails the whole job. `extractor_retries` is
-unaffected; `extractor/common.py:4072` gives it an explicit default
-of 3.
+So an in-process caller that never sets `retries` has no retry **on the
+media transfer**: one transient failure fails that download. Its
+metadata extraction is unaffected, and a repository that drives yt-dlp
+in-process purely to read metadata needs neither key.
+
+C8 therefore constrains `retries` and `fragment_retries` at download
+call sites only. Setting them on an extract-only call site would be
+harmless but meaningless, and requiring it would be a spec asserting a
+defect that is not there. What does apply everywhere: if a repository
+sets `extractor_retries` at all, it must be positive -- setting it to 0
+silently removes the retry that was there by default.
 
 ### Why C10 pins to a version
 
@@ -201,24 +248,67 @@ mandatory; none has a default.
   all three.
 - `needs_ffmpeg`, `needs_ffprobe` -- whether the repository requires
   each binary.
-- `waivers` -- a table of named deviations; see below.
-- `xfail_budget` -- the maximum number of `xfail` markers the
-  conformance test may carry.
+- `waivers` -- a table of named deviations, keyed by aspect; see
+  [Aspects](#aspects) and [Waivers](#waivers) below.
+- `xfail_budget` -- the maximum number of **collected test items in
+  the conformance module that carry an `xfail` marker**. Items, not
+  marker expressions: one `pytestmark` neutralises a whole module, and
+  counting expressions would call that one.
+
+### Aspects
+
+Two of the invariants are not one check. C7 asks for a ceiling that
+holds on _every_ downloader path, and C8 for a bound on the whole
+download; each decomposes, and a test that covers one part must not be
+counted as covering the invariant. So the accounting unit is an
+**aspect**:
+
+- `C7.selectable` -- no format selector, on any fallback branch, can
+  choose an unmeterable downloader.
+- `C7.metered` -- the transfer is observed while it runs, and exceeding
+  the ceiling stops it.
+- `C7.landed` -- the finished bytes are measured before they are
+  published or served.
+- `C8.socket` -- the per-operation socket timeout is declared, not
+  inherited.
+- `C8.retries` -- download call sites set `retries` and
+  `fragment_retries`.
+- `C8.deadline` -- the whole download has a wall-clock bound.
+
+The other invariants are single aspects and are referred to by their
+bare ID. The conformance test declares which aspects it checks
+mechanically; every aspect it does not check must be waived.
+
+Three are **not** mechanically checkable from the shared adapter
+surface today, so every repository waives them explicitly:
+
+- `C5` -- error-message content is not visible through the adapter.
+- `C7.landed` -- a repository that streams its media never lands a
+  file, and one that does exposes no hook for the shared test to
+  inspect.
+- `C8.deadline` -- none of the three has a wall-clock bound today, and
+  a shared test cannot invent the mechanism it would check.
+
+Naming them here, rather than leaving them off the list, is the point:
+an aspect that nobody has to waive is an aspect nobody counts.
 
 ### Waivers
 
-A repository that cannot satisfy an invariant does not silently omit
-it. It records a waiver keyed by invariant ID, with a named reason and
-an issue link:
+A repository that cannot satisfy an aspect does not silently omit it.
+It records a waiver keyed by aspect, with a named reason and an issue
+link:
 
 ```toml
 [tool.ytdlp_conformance.waivers]
 C3 = "deno comes from the container image; see youtube-downloader#NNN"
+"C8.deadline" = "no wall-clock bound on a streamed response; see #NNN"
 ```
 
 Waivers are visible, countable and greppable, which is the whole
-requirement. An invariant with no waiver and no passing test is a
-failure, not a gap.
+requirement. An aspect with no waiver and no passing test is a
+failure, not a gap -- and because the aspect list lives here rather
+than in each repository, adding one upstream turns all three red until
+each decides whether to implement it or waive it.
 
 ## Drift control
 
@@ -250,12 +340,31 @@ access to a private repository. That was judged the wrong trade against
 least privilege, so voice-forge is covered by layers 1 and 2 -- which
 run inside its own CI and are the strong ones -- plus manual review.
 
-The `xfail` list is the backlog, and it may only shrink: the drift
-script fails when the number of `xfail` markers exceeds
-`xfail_budget`. Lowering the budget is a visible one-line diff, and so
-is raising it, which is the intent. The original plan compared against
-the previous commit; a recorded budget replaces that, because CI clones
-are shallow and a check that cannot run is not a check.
+The `xfail` list is the backlog, and it may only shrink: the budget is
+enforced as a test, which fails when more collected items in the
+conformance module carry an `xfail` marker than `xfail_budget` allows.
+Lowering the budget is a visible one-line diff, and so is raising it,
+which is the intent. The original plan compared against the previous
+commit; a recorded budget replaces that, because CI clones are shallow
+and a check that cannot run is not a check.
+
+**The budget is counted from pytest's collection, not from the file's
+text.** A text scan cannot see what pytest sees, and the gap is not
+theoretical: two lines outside the hashed region --
+
+```python
+from pytest import mark
+
+pytestmark = mark.xfail(strict=False, reason="...")
+```
+
+-- turn every test in the module into an `xfail`, while a `grep` for
+`pytest.mark.xfail` finds nothing. Measured against an earlier
+text-scanning version: it reported `0/0 xfail` and exited 0 while
+pytest reported `3 skipped, 4 xfailed, 21 xpassed`. The whole
+conformance suite was neutralised and the drift check called it clean.
+Reading the collected markers covers that, aliased imports, and
+markers applied from a `conftest.py`.
 
 ## Measurement record
 
@@ -278,7 +387,7 @@ because none of it is a general truth about YouTube.
   28.5 MiB. The 232.5 MiB was being fetched to produce a 16 kHz mono
   wav.
 - **Retry defaults**, quoted under
-  [Why C8 does not mean socket_timeout](#why-c8-does-not-mean-socket_timeout).
+  [Three kinds of retry](#three-kinds-of-retry-and-the-one-that-defaults-to-nothing).
 - **Protocol preference**, quoted under
   [Why C7 needs more than max_filesize](#why-c7-needs-more-than-max_filesize).
 
