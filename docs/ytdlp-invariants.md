@@ -265,8 +265,12 @@ counted as covering the invariant. So the accounting unit is an
 
 - `C7.selectable` -- no format selector, on any fallback branch, can
   choose an unmeterable downloader.
-- `C7.metered` -- the transfer is observed while it runs, and exceeding
-  the ceiling stops it.
+- `C7.metered` -- a transfer driven in-process is observed while it
+  runs, and exceeding the ceiling stops it.
+- `C7.external` -- a transfer driven as a subprocess has a byte bound
+  too. The shared test cannot observe one, so this aspect exists to be
+  waived, by name, by any repository that downloads through a
+  subprocess.
 - `C7.landed` -- the finished bytes are measured before they are
   published or served.
 - `C8.socket` -- the per-operation socket timeout is declared, not
@@ -288,6 +292,22 @@ surface today, so every repository waives them explicitly:
   inspect.
 - `C8.deadline` -- none of the three has a wall-clock bound today, and
   a shared test cannot invent the mechanism it would check.
+
+`C7.external` joins them for any repository with a subprocess download
+site, which is every repository here except on its in-process paths.
+The reason it is a waiver rather than a check: the only thing visible
+from an argv is `--max-filesize`, and
+[that is not a ceiling](#why-c7-needs-more-than-max_filesize) -- it is
+consulted once, pre-transfer, only with a known `Content-Length`.
+Asserting its presence would record conformance that does not exist,
+which is worse than recording the gap. Until the adapter can observe a
+subprocess transfer, the honest answer is a named waiver with an issue
+behind it.
+
+Splitting `C7.external` out rather than widening `C7.metered` is
+deliberate: a repository that meters its in-process downloads correctly
+and also shells out for one keeps the credit for the part it does, and
+waives only the part nobody can see.
 
 Naming them here, rather than leaving them off the list, is the point:
 an aspect that nobody has to waive is an aspect nobody counts.
@@ -341,30 +361,43 @@ least privilege, so voice-forge is covered by layers 1 and 2 -- which
 run inside its own CI and are the strong ones -- plus manual review.
 
 The `xfail` list is the backlog, and it may only shrink: the budget is
-enforced as a test, which fails when more collected items in the
-conformance module carry an `xfail` marker than `xfail_budget` allows.
-Lowering the budget is a visible one-line diff, and so is raising it,
-which is the intent. The original plan compared against the previous
-commit; a recorded budget replaces that, because CI clones are shallow
-and a check that cannot run is not a check.
+enforced by the drift script, which fails when more collected items in
+the conformance module carry an `xfail` marker than `xfail_budget`
+allows. Lowering the budget is a visible one-line diff, and so is
+raising it, which is the intent. The original plan compared against the
+previous commit; a recorded budget replaces that, because CI clones are
+shallow and a check that cannot run is not a check.
 
-**The budget is counted from pytest's collection, not from the file's
-text.** A text scan cannot see what pytest sees, and the gap is not
-theoretical: two lines outside the hashed region --
+**The budget is counted from pytest's collection, by a pytest plugin,
+and from outside the conformance module.** Each of those three is there
+because the simpler version failed:
 
-```python
-from pytest import mark
+- _From the collection, not the file's text._ Two lines outside the
+  hashed region --
 
-pytestmark = mark.xfail(strict=False, reason="...")
-```
+  ```python
+  from pytest import mark
 
--- turn every test in the module into an `xfail`, while a `grep` for
-`pytest.mark.xfail` finds nothing. Measured against an earlier
-text-scanning version: it reported `0/0 xfail` and exited 0 while
-pytest reported `3 skipped, 4 xfailed, 21 xpassed`. The whole
-conformance suite was neutralised and the drift check called it clean.
-Reading the collected markers covers that, aliased imports, and
-markers applied from a `conftest.py`.
+  pytestmark = mark.xfail(strict=False, reason="...")
+  ```
+
+  turn every test in the module into an `xfail`, while a `grep` for
+  `pytest.mark.xfail` finds nothing. Measured against a text-scanning
+  version: it reported `0/0 xfail` and exited 0 while pytest reported
+  `3 skipped, 4 xfailed, 21 xpassed`.
+
+- _From outside the module._ Those same two lines mark a budget test
+  living inside the module as well, so its failure is reported as an
+  `xfail` and the run stays green. A check cannot police the module it
+  lives in, and a hook defined in a test module is not called at all.
+- _By a plugin, not by reading pytest's output._ Parsing the
+  human-readable listing made the count depend on how the path was
+  spelled and on how verbose pytest happened to be. Measured on a
+  module with 35 `xfail` items: a plain relative path reported all 35,
+  while `./tests/...`, an absolute path, and the same path under
+  `PYTEST_ADDOPTS=-q` each reported `0/0` and exited 0. A plugin reads
+  the collected items directly and writes a count, so neither spelling
+  nor verbosity can reach it.
 
 ## Measurement record
 
