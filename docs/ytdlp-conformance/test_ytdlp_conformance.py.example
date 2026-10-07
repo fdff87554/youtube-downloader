@@ -32,10 +32,13 @@ import shutil
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import yt_dlp
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 SPEC_VERSION = "1.0.0"
 
@@ -285,6 +288,73 @@ def _transfer_components(formats: list[dict[str, Any]]) -> list[dict[str, Any]]:
         parts = entry.get("requested_formats")
         components.extend(parts if parts else [entry])
     return components
+
+
+def _oversized_events(ceiling: int) -> list[tuple[str, dict[str, Any]]]:
+    """Transfers past ``ceiling``, in the shapes yt-dlp really reports.
+
+    The first shape alone is not enough. ``total_bytes`` is
+    Content-Length, and a hook that reads only that one passes while
+    being unable to stop a transfer of unknown length -- which is the
+    case the ceiling exists for, since ``max_filesize`` already covers
+    the declared-length one. The last shape is the external-downloader
+    report: a single ``finished`` event once the child process exits.
+    """
+    over = ceiling + 1
+    return [
+        (
+            "a transfer reporting its length",
+            {
+                "status": "downloading",
+                "filename": "conformance.part",
+                "downloaded_bytes": over,
+                "total_bytes": over,
+            },
+        ),
+        (
+            "a transfer whose length is None",
+            {
+                "status": "downloading",
+                "filename": "conformance.part",
+                "downloaded_bytes": over,
+                "total_bytes": None,
+            },
+        ),
+        (
+            "a transfer that never reports a length",
+            {
+                "status": "downloading",
+                "filename": "conformance.part",
+                "downloaded_bytes": over,
+            },
+        ),
+        (
+            "a finished transfer",
+            {
+                "status": "finished",
+                "filename": "conformance.part",
+                "downloaded_bytes": over,
+                "total_bytes": over,
+            },
+        ),
+    ]
+
+
+def _drive_hooks(hooks: Iterable[Any], status: dict[str, Any]) -> BaseException | None:
+    """Run the hooks the way yt-dlp does, and report what stopped them.
+
+    ``downloader/common.py:488-495`` iterates every hook in order with
+    the same status object, so the first one to raise ends the
+    transfer and the rest never run. The question this answers is
+    whether the *set* stops it, not whether any particular member
+    does.
+    """
+    for hook in hooks:
+        try:
+            hook(dict(status))
+        except BaseException as error:  # noqa: BLE001
+            return error
+    return None
 
 
 def _unmetered(formats: list[dict[str, Any]]) -> list[tuple[str, str]]:
@@ -896,14 +966,16 @@ class TestTheByteCeilingIsDeclaredAndReachable:
     def test_every_in_process_downloading_site_meters_mid_transfer(
         self, profile: dict[str, Any], call_sites: list[CallSite]
     ) -> None:
-        # C7.metered, and only for sites that actually download.
-        # max_filesize is not a ceiling: downloader/http.py consults it
-        # once, before the transfer, only when Content-Length is known,
-        # and returns False rather than raising.
+        # C7.metered. max_filesize is not a ceiling:
+        # downloader/http.py consults it once, before the transfer,
+        # only when Content-Length is known, and returns False rather
+        # than raising.
         #
-        # The hooks are driven rather than counted. Asserting that
-        # progress_hooks is non-empty passes for a hook that does
-        # nothing, which is the same gap one level further in.
+        # The hooks are driven rather than counted, and driven as a
+        # set: downloader/common.py:488-495 calls every hook in order
+        # with the same status object, so one of them raising is what
+        # stops the transfer. Requiring each hook to raise individually
+        # rejects a perfectly good [observer, guard] pair.
         sites = _in_process(_sites_for(call_sites, DOWNLOAD))
         if not sites:
             pytest.skip("no in-process downloading site to check")
@@ -916,27 +988,21 @@ class TestTheByteCeilingIsDeclaredAndReachable:
                 "the transfer while it runs and max_filesize alone is not "
                 "a ceiling"
             )
-            status = {
-                "status": "downloading",
-                "filename": "conformance.part",
-                "downloaded_bytes": ceiling + 1,
-                "total_bytes": ceiling + 1,
-            }
-            for hook in hooks:
-                with pytest.raises(Exception) as raised:
-                    hook(dict(status))
-                # Any exception type: each repository raises its own,
-                # and a shared test has no business naming it. What
-                # matters is that the transfer does not continue.
-                assert not isinstance(raised.value, AssertionError), (
-                    f"{site.name}'s progress hook failed an assertion of "
-                    "its own rather than stopping the transfer"
+            for label, status in _oversized_events(ceiling):
+                raised = _drive_hooks(hooks, status)
+                assert raised is not None, (
+                    f"{site.name} ran its progress hooks to completion on "
+                    f"{label} and did not stop the transfer"
+                )
+                assert not isinstance(raised, AssertionError), (
+                    f"{site.name}'s progress hooks failed an assertion of "
+                    f"their own on {label} rather than stopping the transfer"
                 )
 
     def test_a_metering_hook_lets_a_transfer_within_the_ceiling_through(
         self, profile: dict[str, Any], call_sites: list[CallSite]
     ) -> None:
-        # The other side of it. A hook that raises on everything would
+        # The other side of it. Hooks that raise on everything would
         # pass the test above and break every download.
         sites = _in_process(_sites_for(call_sites, DOWNLOAD))
         if not sites:
@@ -944,15 +1010,17 @@ class TestTheByteCeilingIsDeclaredAndReachable:
         ceiling = profile["max_bytes"]
         for site in sites:
             assert site.options is not None
-            for hook in site.options.get("progress_hooks") or ():
-                hook(
-                    {
-                        "status": "downloading",
-                        "filename": "conformance.part",
-                        "downloaded_bytes": max(ceiling - 1, 0),
-                        "total_bytes": ceiling,
-                    }
-                )
+            hooks = site.options.get("progress_hooks") or ()
+            within = {
+                "status": "downloading",
+                "filename": "conformance.part",
+                "downloaded_bytes": max(ceiling - 1, 0),
+                "total_bytes": ceiling,
+            }
+            raised = _drive_hooks(hooks, within)
+            assert raised is None, (
+                f"{site.name} stopped a transfer inside its ceiling: {raised!r}"
+            )
 
 
 class TestTheTimeBoundIsExplicit:
