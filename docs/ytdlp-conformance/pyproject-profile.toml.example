@@ -53,7 +53,9 @@ codec_policy = "h264-preferred"
 # undeclared value is one nobody notices changing.
 socket_timeout_seconds = 30
 
-# C7's ceiling, in bytes.
+# C7's ceiling, in bytes. There is no "no ceiling" value: a repository
+# that has not decided on one waives C7.metered and says why, rather
+# than writing a number it does not enforce.
 max_bytes = 4294967296
 
 # The runtime name, or "absent".
@@ -84,14 +86,24 @@ player_clients = ["default"]
 needs_ffmpeg = true
 needs_ffprobe = false
 
-# The maximum number of xfail markers the conformance test may carry.
-# The xfail list is the backlog and may only shrink; the drift script
-# fails when the count exceeds this. Lowering it is a visible one-line
-# diff, and so is raising it.
+# The maximum number of collected test items in the conformance module
+# that may carry an xfail marker. The list is the backlog and may only
+# shrink; a test in the module enforces this, counting from pytest's
+# collection rather than from the file's text. Lowering it is a visible
+# one-line diff, and so is raising it.
 xfail_budget = 0
 
-# A repository that cannot meet an invariant records it here rather
-# than omitting the test. Keyed by invariant ID, and the reason must
-# cite an issue, so the gap stays visible, countable and greppable.
+# A repository that cannot meet an aspect records it here rather than
+# omitting the test. Keyed by aspect, and the reason must cite an
+# issue, so the gap stays visible, countable and greppable.
+#
+# Three have to be here in every repository, because the shared test
+# cannot check them: C5 (error-message content is not visible through
+# the adapter), C7.landed (a streaming repository lands no file) and
+# C8.deadline (nothing here has a wall-clock bound). A waiver is not an
+# apology -- an aspect with no waiver and no test is a failure, and
+# these are how that rule stays satisfiable.
 [tool.ytdlp_conformance.waivers]
-C3 = "deno comes from the container image, so it is not on PATH in CI; see #NNN"
+C5 = "error text is not reachable through the adapter; see #NNN"
+"C7.landed" = "media is streamed to the client and never lands; see #NNN"
+"C8.deadline" = "no wall-clock bound on a streamed response; see #NNN"
