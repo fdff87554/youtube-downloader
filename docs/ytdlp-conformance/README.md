@@ -206,11 +206,41 @@ filter and no path to compare against. A missing count file is a
 failure rather than a count of zero, so the plugin failing to run
 cannot read as a clean module.
 
-Verified against the three routes a marker can arrive by -- an explicit
-decorator, an aliased module-level `pytestmark`, and
-`pytest_collection_modifyitems` in a `conftest.py` -- each of the four
-invocations above, a missing plugin, and a non-integer budget, which an
-earlier version reported as a shell error and then exited 0 on.
+**And it counts from `pytest_collection_finish`, not from
+`pytest_collection_modifyitems`.** A `conftest.py` may add markers from
+its own `pytest_collection_modifyitems`, and counting from that same
+hook made the answer depend on which implementation ran first.
+Measured on a module of 3 items marked from a `conftest.py`:
+
+| `conftest.py` hook    | `modifyitems` | `collection_finish` |
+| --------------------- | ------------- | ------------------- |
+| plain                 | 3             | 3                   |
+| `@hookimpl(tryfirst)` | 3             | 3                   |
+| `@hookimpl(trylast)`  | 0             | 3                   |
+| no marker             | 0             | 0                   |
+
+A plain conftest hook happens to run first -- pluggy calls the
+last-registered implementation first, and a `conftest.py` is registered
+after a `-p` plugin -- which is why this held. It was never stated and
+never measured. `trylast=True` was enough to break it: all 39 items
+marked, the script reporting `0/0` and exiting 0.
+`pytest_collection_finish` is called once collection is complete, so no
+ordering inside `pytest_collection_modifyitems` can reach it.
+
+**What the count still cannot see**: a marker added at run time, as
+from `pytest_runtest_setup`. A collect-only run never gets there --
+measured at `0` while the real run reported `3 xpassed`. Counting those
+means running the suite, which this check deliberately does not do, so
+the boundary is recorded here rather than closed. The suite's own run,
+next to this check in CI, does report them.
+
+`backend/tests/test_conformance_xfail_plugin.py` holds all of the above
+as tests: the three hook orderings, an aliased module-level
+`pytestmark`, an explicit decorator, the four invocations, an unmarked
+module counting zero, and no count file when the destination variable
+is unset. A missing plugin and a non-integer budget -- which an earlier
+version reported as a shell error and then exited 0 on -- are checked
+by the script itself.
 
 The third layer runs only here: `report-sibling-profiles.sh` reads each
 public sibling's declared `spec_version` and `canonical_region_sha256`
