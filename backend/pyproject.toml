@@ -18,7 +18,7 @@ dependencies = [
     # dependabot surfaces further bumps as PRs rather than letting CI float.
     "fastapi>=0.121.0,<0.142",
     "uvicorn[standard]>=0.30.0,<0.55",
-    "yt-dlp==2026.8.19",
+    "yt-dlp==2026.10.21",
     # The challenge solver scripts. Without them the Deno runtime the
     # image ships is registered but has no script to run, and every
     # YouTube extraction reports "Signature solving failed" and
