@@ -15,7 +15,7 @@ RUN npm run build
 # The application package itself is not installed: stage 3 copies app/
 # into WORKDIR, which uvicorn picks up through the working directory
 # already being on sys.path. Only third-party dependencies are needed here.
-FROM python:3.14.7-slim-bookworm AS backend-deps
+FROM python:3.15.0-slim-bookworm AS backend-deps
 WORKDIR /build
 RUN pip install --no-cache-dir --upgrade pip
 COPY backend/requirements.lock ./
@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir --require-hashes --prefix=/install \
     -r requirements.lock
 
 # Stage 3: Runtime
-FROM python:3.14.7-slim-bookworm
+FROM python:3.15.0-slim-bookworm
 
 # Install nginx (reverse proxy + static files), ffmpeg (audio/video muxing
 # for yt-dlp), and curl (used by HEALTHCHECK).
